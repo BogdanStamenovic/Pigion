@@ -1,0 +1,4 @@
+1.Shell, Description: Executes a shell command and returns stdout/stderr, Command - shell:COMMAND, Example - shell:echo "hi"
+2.Memory, Description: Stores temporary context memory for the current session (not persistent), Command - memadd:TEXT, Example - memadd:User prefers Python
+3.Search, Description: Performs web search for queries or extracts text content from a URL, Command - search:QUERY_OR_URL, Example - search:openai api or search:https://example.com
+4.Return, Description: Returns something back to the user at the end of the goal if needed, Command - return:TEXT, example - return:The task has been completed succesfully
