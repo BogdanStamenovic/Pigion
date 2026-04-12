@@ -4,7 +4,7 @@ Pigeon je lokalni autonomni agent framework zamišljen kao dedicated execution w
 
 ## Trenutno stanje projekta
 
-Trenutno je implementiran Watchdog, odnosno glavni agent loop. Njegova svrha je da uzme jedan goal, razbije ga na ograničen broj koraka, izvršava samo trenutni korak, koristi alate preko tekstualnih akcija i po potrebi pokušava recovery. Pored toga postoji experience store koji čuva prethodne failure obrasce i njihove uspešne alternative kako bi recovery imao dodatni kontekst. Ceo flow je bounded i ne može da ostane zaglavljen beskonačno, jer svaki korak i svaki nivo retry-a imaju hardkodovane limite. fileciteturn5file0L13-L24 fileciteturn5file0L314-L351 fileciteturn5file0L773-L941
+Trenutno je implementiran Watchdog, odnosno glavni agent loop. Njegova svrha je da uzme jedan goal, razbije ga na ograničen broj koraka, izvršava samo trenutni korak, koristi alate preko tekstualnih akcija i po potrebi pokušava recovery. Pored toga postoji experience store koji čuva prethodne failure obrasce i njihove uspešne alternative kako bi recovery imao dodatni kontekst. Ceo flow je bounded i ne može da ostane zaglavljen beskonačno, jer svaki korak i svaki nivo retry-a imaju hardkodovane limite.
 
 ## Arhitektura
 
@@ -16,7 +16,7 @@ Trenutna i planirana arhitektura je hijerarhijska i modularna:
 - Mutormentor: eksperimentalni sloj za mutacije promptova i njihovo testiranje.
 - Watchdog: glavni execution agent.
 
-Watchdog je jedini deo koji je trenutno direktno implementiran u dostavljenom kodu. Ostali slojevi su planirani, ali još nisu integrisani u runtime prikazan ovde. fileciteturn5file0L773-L941
+Watchdog je jedini deo koji je trenutno direktno implementiran u dostavljenom kodu. Ostali slojevi su planirani, ali još nisu integrisani u runtime prikazan ovde.
 
 ## Kako Watchdog radi trenutno
 
@@ -34,7 +34,7 @@ Watchdog koristi niz runtime parametara kroz environment promenljive. Najbitnije
 - putanja do experience baze
 - broj sličnih failure primera koji se vraćaju recovery fazi
 
-Token accounting je trenutno aproksimacija zasnovana na dužini prompta, a ne stvarni usage iz API odgovora. Experience baza se čuva kao JSONL fajl. fileciteturn5file0L13-L24 fileciteturn5file0L44-L71 fileciteturn5file0L275-L313
+Token accounting je trenutno aproksimacija zasnovana na dužini prompta, a ne stvarni usage iz API odgovora. Experience baza se čuva kao JSONL fajl.
 
 ### 2. Učitavanje okruženja i dokumentacije alata
 
@@ -43,7 +43,7 @@ Na startu se pokušava učitavanje dva tekstualna fajla:
 - `td.txt` za opis dostupnih alata
 - `enving.txt` za opis okruženja
 
-Ti tekstovi se kasnije direktno ubacuju u system prompt, tako da Watchdog u svakom LLM pozivu dobija isto objašnjenje okruženja i tool surface-a. Ako fajlovi ne postoje, koriste se fallback poruke. fileciteturn5file0L28-L41
+Ti tekstovi se kasnije direktno ubacuju u system prompt, tako da Watchdog u svakom LLM pozivu dobija isto objašnjenje okruženja i tool surface-a. Ako fajlovi ne postoje, koriste se fallback poruke.
 
 ### 3. JSON disciplina i ekstrakcija izlaza
 
@@ -53,7 +53,7 @@ Watchdog očekuje da model uvek vraća validan JSON objekat. Zbog toga:
 - pokušava prvo direktan `json.loads`
 - ako to ne uspe, pokušava da izdvoji prvi validan JSON objekat iz sirovog teksta
 
-Ovo je osnovni mehanizam koji drži agent determinističnijim i kompatibilnim sa ostatkom kontrolnog loop-a. fileciteturn5file0L49-L71
+Ovo je osnovni mehanizam koji drži agent determinističnijim i kompatibilnim sa ostatkom kontrolnog loop-a.
 
 ### 4. Experience store
 
@@ -67,7 +67,7 @@ Experience store služi za čuvanje prethodnih failure događaja i uspešnih alt
 - `successful_action`: akciju koja je kasnije bila uspešna
 - `created_at`: timestamp
 
-Prilikom učitavanja baze svi entry-ji se tokenizuju i pretvaraju u sparse vektore. Sličnost se računa cosine similarity pristupom nad kombinacijom `name`, `reason`, `step` i `failed_action`. Rezultat recovery fazi vraća top K najsličnijih prethodnih failova. fileciteturn5file0L74-L182
+Prilikom učitavanja baze svi entry-ji se tokenizuju i pretvaraju u sparse vektore. Sličnost se računa cosine similarity pristupom nad kombinacijom `name`, `reason`, `step` i `failed_action`. Rezultat recovery fazi vraća top K najsličnijih prethodnih failova.
 
 ### 5. Klasifikacija failure događaja
 
@@ -86,7 +86,7 @@ Kada dođe do faila, Watchdog pokušava da ga svede na generičko ime greške po
 - `memory_write_failed`
 - `generic_step_failure`
 
-Ovaj layer je važan jer experience retrieval ne radi samo po slobodnom tekstu, nego i po stabilnom failure identitetu. fileciteturn5file0L185-L212
+Ovaj layer je važan jer experience retrieval ne radi samo po slobodnom tekstu, nego i po stabilnom failure identitetu.
 
 ### 6. Konstrukcija system prompt-a
 
@@ -114,7 +114,7 @@ Najvažnija pravila su:
 - status može biti `ongoing`, `done` ili `fail`
 - izlaz mora biti validan JSON
 
-To znači da je Watchdog trenutno vrlo prompt-driven i da dosta discipline dobija iz velikog system prompt-a, a ne iz mnogo spoljne logike. fileciteturn5file0L231-L273
+To znači da je Watchdog trenutno vrlo prompt-driven i da dosta discipline dobija iz velikog system prompt-a, a ne iz mnogo spoljne logike.
 
 ### 7. LLM pozivi
 
@@ -127,7 +127,7 @@ To znači da je Watchdog trenutno vrlo prompt-driven i da dosta discipline dobij
 5. loguje raw model output
 6. parsira rezultat u JSON
 
-Ako svi pokušaji propadnu, baca runtime grešku. fileciteturn5file0L275-L313
+Ako svi pokušaji propadnu, baca runtime grešku.
 
 ### 8. Planiranje
 
@@ -138,7 +138,7 @@ Na početku svakog goal-a Watchdog prvo traži od modela plan. Plan mora da bude
 - bez tool call-ova
 - bez subplanova
 
-Ako plan nije validna lista, izvršavanje se prekida. Plan je samo okvir; kasnije se i dalje radi strogo korak po korak. fileciteturn5file0L314-L351
+Ako plan nije validna lista, izvršavanje se prekida. Plan je samo okvir; kasnije se i dalje radi strogo korak po korak.
 
 ### 9. Biranje sledeće akcije
 
@@ -155,7 +155,7 @@ Akcija je tekstualna komanda tipa:
 - `memadd:...`
 - `return:...`
 
-Postoji i mehanizam `force_next_action` koji recovery faza može da upiše u state. Kada je on postavljen, sledeća akcija se ne bira preko modela već se direktno izvršava. fileciteturn5file0L354-L408
+Postoji i mehanizam `force_next_action` koji recovery faza može da upiše u state. Kada je on postavljen, sledeća akcija se ne bira preko modela već se direktno izvršava.
 
 ### 10. Evaluacija poslednje akcije
 
@@ -165,7 +165,7 @@ Posle svake izvršene akcije, Watchdog ponovo zove model da proceni samo posledn
 - `done`
 - `fail`
 
-Ovo je druga grana LLM logike pored biranja sledeće akcije. Trenutno postoji odvojena evaluaciona faza, pa Watchdog radi odluku, zatim tool execution, zatim evaluaciju tog output-a. fileciteturn5file0L411-L456
+Ovo je druga grana LLM logike pored biranja sledeće akcije. Trenutno postoji odvojena evaluaciona faza, pa Watchdog radi odluku, zatim tool execution, zatim evaluaciju tog output-a.
 
 ### 11. Recovery faza
 
@@ -189,25 +189,25 @@ To recovery logici daje mogućnost da:
 - preskoči korak ako nije bitan ili je praktično završen
 - potpuno prekine goal ako dalji rad nema smisla ili nije bezbedan
 
-Broj recovery pokušaja je takođe bounded. fileciteturn5file0L459-L499 fileciteturn5file0L629-L771
+Broj recovery pokušaja je takođe bounded.
 
 ### 12. Izvršavanje alata
 
 Watchdog trenutno podržava četiri tipa akcija:
 
 #### `return:`
-Dodaje tekst u završni `returned_output` i ažurira state. fileciteturn5file0L506-L518
+Dodaje tekst u završni `returned_output` i ažurira state.
 
 #### `search:`
-Poziva `search(query)` i rezultat čuva kao `last_tool_output`. fileciteturn5file0L520-L529
+Poziva `search(query)` i rezultat čuva kao `last_tool_output`.
 
 #### `shell:`
-Poziva `shell(command)` i rezultat čuva kao `last_tool_output`. Ovo je najmoćniji alat, jer agentu daje direktan shell surface. fileciteturn5file0L531-L540
+Poziva `shell(command)` i rezultat čuva kao `last_tool_output`. Ovo je najmoćniji alat, jer agentu daje direktan shell surface.
 
 #### `memadd:`
-Dodaje vrednost u internu memory ako se ista vrednost već ne nalazi na kraju memory stringa. Održava i `memory_items` listu u state-u. fileciteturn5file0L542-L566
+Dodaje vrednost u internu memory ako se ista vrednost već ne nalazi na kraju memory stringa. Održava i `memory_items` listu u state-u.
 
-Ako alat nije prepoznat, funkcija vraća `UNKNOWN_TOOL`. fileciteturn5file0L568-L575
+Ako alat nije prepoznat, funkcija vraća `UNKNOWN_TOOL`.
 
 ### 13. Pending failure i upis iskustva
 
@@ -219,7 +219,7 @@ Kada se fail detektuje, Watchdog formira `pending_failure` objekat koji sadrži:
 - failed action
 - timestamp
 
-Kasnije, kada neka naredna akcija uspešno zatvori korak, `finalize_experience_if_needed` upisuje novi entry u experience store. Na taj način sistem pokušava da pamti koje alternative su bile korisne nakon određenog failure obrasca. fileciteturn5file0L578-L627
+Kasnije, kada neka naredna akcija uspešno zatvori korak, `finalize_experience_if_needed` upisuje novi entry u experience store. Na taj način sistem pokušava da pamti koje alternative su bile korisne nakon određenog failure obrasca.
 
 ### 14. Glavni execution loop
 
@@ -244,7 +244,7 @@ Ograničenja su hardkodovana:
 - do 6 recovery pokušaja po koraku
 - token budget po goal-u
 
-Ako korak ne može da se završi u zadatim granicama, goal se prekida greškom. To znači da je izvršavanje bounded i ne postoji beskonačni loop unutar jednog goal-a. fileciteturn5file0L773-L941
+Ako korak ne može da se završi u zadatim granicama, goal se prekida greškom. To znači da je izvršavanje bounded i ne postoji beskonačni loop unutar jednog goal-a.
 
 ## Trenutna svojstva Watchdog-a
 
@@ -320,3 +320,16 @@ Pigeon nije zamišljen kao jedan proces sa više internih submodula koji svi rad
 - Mutormentor radi kada ostali delovi sistema nisu aktivni
 
 Time se zadržava jasan separation of concerns i izbegava se da recovery, maintenance i evolucija sistema budu pomešani sa samim izvršavanjem zadataka.
+
+## Roadmap redosled
+
+Trenutni plan razvoja ide ovim redosledom:
+
+1. Cleaner
+2. optimizacija Watchdog-a
+3. Cogmet
+4. Bossman
+5. Mutate, odnosno Mutormentor, ako bude potreban u toj fazi
+6. automatske setup skripte za Raspberry Pi okruženje
+
+Cilj završne faze je da Pigeon dobije automatizovan setup za Raspberry Pi, pošto je ceo sistem od početka zamišljen da bude namenjen dedicated RPi mašini i dugotrajnom lokalnom radu.
