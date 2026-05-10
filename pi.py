@@ -8,15 +8,16 @@ from typing import Any, Dict, List, Optional
 from google import genai
 from google.genai import types
 
-from tools.shell import shell
-from tools.search import search
+from tools_linux.shell import shell
+from tools_linux.search import search
 from dotenv import load_dotenv
 
 # =========================
 # CONFIG
 # =========================
 returned_output = ""
-ABS_PATH = "C:\\Users\\helper\\Desktop\\Pigion"
+load_dotenv()
+ABS_PATH = os.getenv("ABS_PATH")
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
@@ -24,16 +25,17 @@ MAX_ACTIONS_PER_STEP = int(os.getenv("MAX_ACTIONS_PER_STEP", "12"))
 MAX_LLM_RETRIES = int(os.getenv("MAX_LLM_RETRIES", "6"))
 MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "6"))
 TOKENS_PER_GOAL = int(os.getenv("TOKENS_PER_GOAL", "100000"))
-EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "pi_exp\\exp.jsonl"))
+EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "pi_exp/exp.jsonl"))
 SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
+MEMORY_VALS = {}
 
 
 # =========================
 # ENV LOADERS
 # =========================
-def load_tool_docs(path: str = "pi_exp\\td.txt", abs: str=ABS_PATH) -> str:
+def load_tool_docs(path: str = "pi_exp/td.txt", abs: str=ABS_PATH) -> str:
     path = os.path.join(abs, path)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -43,7 +45,7 @@ def load_tool_docs(path: str = "pi_exp\\td.txt", abs: str=ABS_PATH) -> str:
 
 
 
-def load_env(path: str = "pi_exp\\enving.txt", abs: str=ABS_PATH) -> str:
+def load_env(path: str = "pi_exp/enving.txt", abs: str=ABS_PATH) -> str:
     try:
         path = os.path.join(abs, path)
         with open(path, "r", encoding="utf-8") as f:
@@ -291,6 +293,12 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
+    global MEMORY_VALS
+    memory_vals_block = (
+        "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
+        if MEMORY_VALS
+        else ""
+    )
     return f"""
 You are an autonomous agent.
 
@@ -317,6 +325,7 @@ COMPLETED STEPS:
 
 MEMORY:
 {memory}
+{memory_vals_block}
 
 RUNTIME STATE:
 {safe_json(state)}
@@ -666,6 +675,12 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
         if existing_lines and existing_lines[-1] == value:
             new_memory = memory
             output = "MEMORY_ALREADY_ENDED_WITH_SAME_VALUE"
+        elif "=" in value:
+            global MEMORY_VALS
+            key, val = value.split("=", 1)
+            MEMORY_VALS[key] = val
+            new_memory = memory
+            output = f"MEMORY_KEY_UPDATED: {key} to {val}"
         else:
             new_memory = (memory + "\n" + value).strip() if memory else value
             output = "MEMORY_UPDATED"
@@ -1069,7 +1084,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "")
+            "Go into the test folder and sort the files into subfolders by extension.")
     finally:
         try:
             client.close()

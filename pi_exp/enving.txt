@@ -1,2 +1,2 @@
-OS: Debian GNU/Linux 11 (bullseye)
-TERMINAL: bash
+OS: Kali GNU/Linux Rolling
+TERMINAL: zsh

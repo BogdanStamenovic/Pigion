@@ -5,3 +5,6 @@ dist/
 __pycache__
 *.jsonl
 test/
+test.py
+laptop_exp/enving.txt
+pi_exp/enving.txt
