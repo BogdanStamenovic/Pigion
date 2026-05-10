@@ -1,4 +1,4 @@
-import json
+﻿import json
 import math
 import os
 import re
@@ -16,23 +16,26 @@ from tools.search import search
 # CONFIG
 # =========================
 returned_output = ""
+MEMORY_VALS = {}
+ABS_PATH = "C:\\Users\\helper\\Desktop\\Pigion"
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
 MAX_ACTIONS_PER_STEP = int(os.getenv("MAX_ACTIONS_PER_STEP", "12"))
 MAX_LLM_RETRIES = int(os.getenv("MAX_LLM_RETRIES", "6"))
 MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "6"))
-TOKENS_PER_GOAL = int(os.getenv("TOKENS_PER_GOAL", "50000"))
-EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join("..\\exp", "exp.jsonl"))
+TOKENS_PER_GOAL = int(os.getenv("TOKENS_PER_GOAL", "100000"))
+EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "laptop_exp\\exp.jsonl"))
 SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
-
+print(EXP_DB_PATH)
 tokens_used = 0
 
 
 # =========================
 # ENV LOADERS
 # =========================
-def load_tool_docs(path: str = "td.txt") -> str:
+def load_tool_docs(path: str = "laptop_exp\\td.txt", abs: str=ABS_PATH) -> str:
+    path = os.path.join(abs, path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
@@ -41,8 +44,9 @@ def load_tool_docs(path: str = "td.txt") -> str:
 
 
 
-def load_env(path: str = "enving.txt") -> str:
+def load_env(path: str = "laptop_exp\\enving.txt", abs: str=ABS_PATH) -> str:
     try:
+        path = os.path.join(abs, path)
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
@@ -51,7 +55,7 @@ def load_env(path: str = "enving.txt") -> str:
 
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
-
+print (TOOL_DOCS, ENVING)
 
 # =========================
 # TOKEN / JSON HELPERS
@@ -257,7 +261,7 @@ def infer_failure_name(action: str, error: str) -> str:
 # CLIENT INIT
 # =========================
 def init_client() -> genai.Client:
-    api_key = ""
+    api_key = os.getenv("API_KEY")
     if api_key:
         return genai.Client(api_key=api_key)
     return genai.Client()
@@ -287,6 +291,12 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
+    global MEMORY_VALS
+    memory_vals_block = (
+    "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
+    if MEMORY_VALS
+    else ""
+)
     return f"""
 You are an autonomous agent.
 
@@ -313,6 +323,7 @@ COMPLETED STEPS:
 
 MEMORY:
 {memory}
+{memory_vals_block}
 
 RUNTIME STATE:
 {safe_json(state)}
@@ -337,6 +348,8 @@ CORE EXECUTION RULES:
 - Do NOT optimize by doing multiple future steps early.
 - Do NOT assume hidden memory. Use only GOAL, PLAN FRAMEWORK, MEMORY, STATE, and ACTION HISTORY.
 - If you need something remembered, use the memory tool syntax (example: memadd:some value).
+- You have LIMITED state history, if a step takes many actions, you may forget early ones.
+- You CANNOT access memadd files trough shell commands, write it yourself.
 - Actions must be valid tool commands (example: "shell:cat secret", "memadd:123").
 
 STRICT OUTPUT RULES:
@@ -535,7 +548,7 @@ RULES:
 - Mark "done" ONLY if the CURRENT STEP itself is complete.
 - Do NOT mark "done" because future-step work was started.
 - If the action was useful but the CURRENT STEP is not finished, return "ongoing".
-- If the action failed or violated step scope, return "fail".
+- If the action failed, violated stepscope or caused an error, return "fail".
 """
     result = call_llm(prompt, system)
     result.setdefault("status", "fail")
@@ -611,7 +624,15 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     local_state = dict(state)
     local_state["last_action"] = action
-
+    if action.startswith("askuser:"):
+        output = input(action[len("askuser:") :].strip())
+        local_state["last_tool_output"] = output
+        return {
+            "ok": True,
+            "output": output,
+            "memory": memory,
+            "state": local_state,
+        }
     if action.startswith("return:"):
         output = action[len("return:") :].strip()
         local_state["last_tool_output"] = output
@@ -652,6 +673,12 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
         if existing_lines and existing_lines[-1] == value:
             new_memory = memory
             output = "MEMORY_ALREADY_ENDED_WITH_SAME_VALUE"
+        elif "=" in value:
+            global MEMORY_VALS
+            key, val = value.split("=", 1)
+            MEMORY_VALS[key] = val
+            new_memory = memory
+            output = f"MEMORY_KEY_UPDATED: {key} to {val}"
         else:
             new_memory = (memory + "\n" + value).strip() if memory else value
             output = "MEMORY_UPDATED"
@@ -834,7 +861,7 @@ def apply_recovery_decision(
 # MAIN LOOP
 # =========================
 def run_agent(goal: str) -> None:
-    global returned_output, tokens_used
+    global returned_output, tokens_used, MEMORY_VALS
     returned_output = ""
     tokens_used = 0
 
@@ -982,7 +1009,7 @@ def run_agent(goal: str) -> None:
 
             eval_status = str(evaluation.get("status", "")).strip().lower()
             eval_reason = str(evaluation.get("reason", "No reason provided"))
-
+            print(MEMORY_VALS)
             if eval_status == "done":
                 print(f"✅ STEP COMPLETE AFTER ACTION: {next_action}")
                 finalize_experience_if_needed(exp_store, state, next_action)
@@ -1045,6 +1072,8 @@ def run_agent(goal: str) -> None:
     )
     print("\n🧠 FINAL MEMORY:")
     print(memory)
+    print("\n📊 MEMORY VALUES:")
+    print(MEMORY_VALS)
     print("\n📦 FINAL STATE:")
     print(safe_json(state))
 
@@ -1055,7 +1084,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "Idi u nepostojeći folder na desktopu, pokušaj da ga koristiš, zatim pronađi pravi desktop, napravi folder test_env, uđi u njega, napravi python venv i instaliraj paket koji će failovati prvi put, pa ga popravi.")
+            "Go into the test folder, and then sort the files based on their types.")
     finally:
         try:
             client.close()
