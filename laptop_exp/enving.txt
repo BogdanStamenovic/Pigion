@@ -1,0 +1,2 @@
+OS: Windows 10
+TERMINAL: powershell
