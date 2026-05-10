@@ -10,7 +10,7 @@ from google.genai import types
 
 from tools.shell import shell
 from tools.search import search
-
+from dotenv import load_dotenv
 
 # =========================
 # CONFIG
@@ -261,6 +261,7 @@ def infer_failure_name(action: str, error: str) -> str:
 # CLIENT INIT
 # =========================
 def init_client() -> genai.Client:
+    load_dotenv()
     api_key = os.getenv("API_KEY")
     if api_key:
         return genai.Client(api_key=api_key)
