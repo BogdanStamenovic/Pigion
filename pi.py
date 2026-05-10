@@ -685,11 +685,6 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             new_memory = (memory + "\n" + value).strip() if memory else value
             output = "MEMORY_UPDATED"
 
-        memory_items = list(local_state.get("memory_items", []))
-        if value not in memory_items:
-            memory_items.append(value)
-
-        local_state["memory_items"] = memory_items
         local_state["last_tool_output"] = output
         return {
             "ok": True,
@@ -870,7 +865,8 @@ def run_agent(goal: str) -> None:
     exp_store = ExpStore(EXP_DB_PATH)
     memory = ""
     state: Dict[str, Any] = {
-        "memory_items": [],
+        "memory": memory,
+        "MEMORYVALS": MEMORY_VALS,
         "last_action": None,
         "last_tool_output": None,
         "pending_failure": None,
@@ -903,6 +899,7 @@ def run_agent(goal: str) -> None:
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
+            print(MEMORY_VALS)
             print(
                 f"🔄 ACTION ROUND {round_index + 1}/{MAX_ACTIONS_PER_STEP} tokens_used={tokens_used}"
             )
@@ -1084,7 +1081,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "Go into the test folder and sort the files into subfolders by extension.")
+            "Im testing your memory vals, make a list in memory and then change it")
     finally:
         try:
             client.close()
