@@ -1,0 +1,4 @@
+ddgs==9.13.0
+protobuf==7.34.1
+python-dotenv==1.2.2
+google-genai==1.70.0
