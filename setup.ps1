@@ -47,18 +47,28 @@ if (Test-Path "requirements.txt") {
 }
 
 # Prompt for API key and write to .env
+# Helper functions to write UTF-8 without BOM (Windows PowerShell writes BOM by default)
+function Write-TextUtf8NoBom {
+    param([string]$Path, [string]$Text)
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+function Write-LinesUtf8NoBom {
+    param([string]$Path, [string[]]$Lines)
+    [System.IO.File]::WriteAllLines($Path, $Lines, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 $apiKey = Read-Host "Enter API_KEY (leave empty to set blank)"
 $absPath = (Get-Location).Path
 
 # Prepare .env content
 $envContent = @()
-$envContent += "API_KEY=\"$apiKey\""
-$envContent += "ABS_PATH=\"$absPath\""
+$envContent += "API_KEY=`"$apiKey`""
+$envContent += "ABS_PATH=`"$absPath`""
 
 if (Test-Path ".env") {
     $overwrite = Read-Host ".env already exists. Overwrite it? [y/N]"
-    if ($overwrite -match '^[yY]$') {
-        $envContent | Set-Content .env -Encoding UTF8
+        if ($overwrite -match '^[yY]$') {
+        Write-LinesUtf8NoBom ".env" $envContent
     } else {
         # Update or add API_KEY
         $lines = Get-Content .env
@@ -67,21 +77,21 @@ if (Test-Path ".env") {
         $newLines = @()
         foreach ($line in $lines) {
             if ($line -match '^API_KEY=') {
-                $newLines += "API_KEY=\"$apiKey\""
+                $newLines += "API_KEY=`"$apiKey`""
                 $foundApi = $true
             } elseif ($line -match '^ABS_PATH=') {
-                $newLines += "ABS_PATH=\"$absPath\""
+                $newLines += "ABS_PATH=`"$absPath`""
                 $foundAbs = $true
             } else {
                 $newLines += $line
             }
         }
-        if (-not $foundApi) { $newLines += "API_KEY=\"$apiKey\"" }
-        if (-not $foundAbs) { $newLines += "ABS_PATH=\"$absPath\"" }
-        $newLines | Set-Content .env -Encoding UTF8
+        if (-not $foundApi) { $newLines += "API_KEY=`"$apiKey`"" }
+        if (-not $foundAbs) { $newLines += "ABS_PATH=`"$absPath`"" }
+        Write-LinesUtf8NoBom ".env" $newLines
     }
 } else {
-    $envContent | Set-Content .env -Encoding UTF8
+    Write-LinesUtf8NoBom ".env" $envContent
 }
 
 Write-Host "Done. .env created/updated."
@@ -95,11 +105,27 @@ $deviceType = $deviceType.ToLower()
 
 # Auto-detect OS and TERMINAL for this device
 if ($deviceType -eq "pi" -or $deviceType -eq "laptop") {
-    $deviceOs = (Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty Caption)
-    $deviceTerminal = $env:TERM
-    if (-not $deviceTerminal) { $deviceTerminal = $env:COMSPEC }
-    if (-not $deviceTerminal) { $deviceTerminal = "powershell" }
+    try {
+        $deviceOs = (Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty Caption)
+    } catch {
+        $deviceOs = $env:OS
+    }
+    if ($deviceOs -and $deviceOs -match 'Windows') {
+        $deviceTerminal = 'powershell'
+    } else {
+        $deviceTerminal = $env:TERM
+        if (-not $deviceTerminal) { $deviceTerminal = $env:COMSPEC }
+        if (-not $deviceTerminal) { $deviceTerminal = $env:SHELL }
+        if (-not $deviceTerminal) { $deviceTerminal = 'bash' }
+    }
 }
+
+# Populate current device's enving.txt automatically
+$currentEnvPath = if ($deviceType -eq "pi") { "pi_exp/enving.txt" } else { "laptop_exp/enving.txt" }
+$currentEnvDir = Split-Path $currentEnvPath -Parent
+if (-not (Test-Path $currentEnvDir)) { New-Item -ItemType Directory -Path $currentEnvDir | Out-Null }
+Write-TextUtf8NoBom $currentEnvPath "OS: $deviceOs`nTERMINAL: $deviceTerminal"
+Write-Host "Populated $currentEnvPath with current device specs."
 
 # Ask for other device's enving.txt fields
 $otherLabel = if ($deviceType -eq "pi") { "laptop" } else { "pi" }
@@ -110,5 +136,5 @@ $otherTerminal = Read-Host "Enter $otherLabel TERMINAL (e.g. powershell):"
 
 $otherEnvDir = Split-Path $otherEnvPath -Parent
 if (-not (Test-Path $otherEnvDir)) { New-Item -ItemType Directory -Path $otherEnvDir | Out-Null }
-"OS: $otherOs`nTERMINAL: $otherTerminal" | Set-Content $otherEnvPath -Encoding UTF8
+Write-TextUtf8NoBom $otherEnvPath "OS: $otherOs`nTERMINAL: $otherTerminal"
 Write-Host "Populated $otherEnvPath with $otherLabel specs."

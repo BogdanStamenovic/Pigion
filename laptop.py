@@ -265,6 +265,7 @@ def infer_failure_name(action: str, error: str) -> str:
 def init_client() -> genai.Client:
     load_dotenv()
     api_key = os.getenv("API_KEY")
+    print(api_key)
     if api_key:
         return genai.Client(api_key=api_key)
     return genai.Client()
