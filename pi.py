@@ -660,7 +660,10 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     if action.startswith("shell:"):
         command = action[len("shell:") :].strip()
-        output = str(shell(command))
+        if "sudo" in command:
+            output = str(shell(command, sudo=True))
+        else:
+            output = str(shell(command))
         local_state["last_tool_output"] = output
         return {
             "ok": True,
@@ -1081,7 +1084,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "Im testing your memory vals, make a list in memory and then change it")
+            "try to use sudo to do something")
     finally:
         try:
             client.close()

@@ -83,6 +83,21 @@ else
   printf 'API_KEY="%s"\nABS_PATH="%s"\n' "$esc_key" "$ABS_PATH" > .env
 fi
 
+# Prompt for sudo password (optional) and store in .env
+read -s -r -p "Enter SUDO_PASSWORD to store in .env (leave empty to skip): " SUDO_PASSWORD
+echo
+esc_sudo="${SUDO_PASSWORD//\"/\\\"}"
+
+if [ -f .env ]; then
+  if [ -n "$SUDO_PASSWORD" ]; then
+    if grep -q '^SUDO_PASSWORD=' .env; then
+      awk -v val="$esc_sudo" 'BEGIN{q="\""} /^SUDO_PASSWORD=/{print "SUDO_PASSWORD=" q val q; next} {print}' .env > .env.tmp && mv .env.tmp .env
+    else
+      printf 'SUDO_PASSWORD="%s"\n' "$esc_sudo" >> .env
+    fi
+  fi
+fi
+
 chmod 600 .env || true
 
 echo "Done. .env created/updated."

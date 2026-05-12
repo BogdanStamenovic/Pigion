@@ -2,6 +2,29 @@
 
 Pigeon je lokalni autonomni agent framework zamišljen kao dedicated execution wrapper za mašinu koja je namenjena isključivo njemu. Trenutni fokus projekta je Watchdog, primarni agent koji planira, izvršava, evaluira i oporavlja se od grešaka unutar striktno ograničenog kontrolnog loop-a. Ostatak sistema je zamišljen hijerarhijski i odvojeno: Bossman, Cogmet, Cleaner i Mutormentor.
 
+## Projekt - struktura i novosti
+
+Ovaj README je ažuriran da opiše dodatne module i skripte koje su dodate u repozitorij:
+
+- **`laptop.py`** — Watchdog agent konfigurisan za laptop/Windows okruženje (koristi `tools_windows`).
+- **`pi.py`** — isto što i `laptop.py` ali za Linux/Raspberry Pi okruženje (koristi `tools_linux`).
+- **`tools_linux/`** — `shell.py` (persistent PTY-backed bash, sanitizacija izlaza, podrška za sudo i `.env`), `search.py` (DDGS wrapper za pretragu i ekstrakciju stranica).
+- **`tools_windows/`** — `shell.py` (persistent PowerShell runner), `search.py` (DDGS wrapper).
+- **`agent_test_makers/`** — skripte za generisanje test primera (npr. `file_sort_test.py`).
+- **`laptop_exp/` i `pi_exp/`** — primer direktorijumi za `td.txt`, `enving.txt` i `exp.jsonl` (experience store).
+- **`test/`** — primeri fajlova za sortiranje (html, ini, json, md, py, text, txt).
+- **`requirements.txt`**, **`setup.sh`** i **`setup.ps1`** — pomoćni fajlovi za instalaciju i setup.
+- **`.env`** — opcionalni fajl za environment promenljive (npr. `API_KEY`, `ABS_PATH`, `SUDO_PASSWORD`).
+
+Krucijalne nadogradnje dodate u repo:
+- Persistentne shell implementacije (`tools_linux.shell`, `tools_windows.shell`) koje održavaju dugotrajan shell proces i vraćaju očišćen izlaz.
+- Bolja `sudo` podrška (može učitati lozinku iz environment varijable ili `.env`; pokušava subprocess run kada lozinka postoji radi čiste kontrole izlaza).
+- `ExpStore` — jednostavan lokalni experience store (`.jsonl`) sa sparse-vector vektorizacijom i cosine-similarity pretragom.
+- Primeri za laptop i Raspberry Pi (`laptop.py`, `pi.py`) sa default goal-ima i loaderima za `td.txt`/`enving.txt`.
+- `tools_*/*.search` — DDGS-based search/extract helper.
+
+U nastavku stoje detaljniji opisi Watchdog-a i planovi razvoja (sadržaj iz originalnog README je zadržan i dopunjen sa gornjim stvarima).
+
 ## Trenutno stanje projekta
 
 Trenutno je implementiran Watchdog, odnosno glavni agent loop. Njegova svrha je da uzme jedan goal, razbije ga na ograničen broj koraka, izvršava samo trenutni korak, koristi alate preko tekstualnih akcija i po potrebi pokušava recovery. Pored toga postoji experience store koji čuva prethodne failure obrasce i njihove uspešne alternative kako bi recovery imao dodatni kontekst. Ceo flow je bounded i ne može da ostane zaglavljen beskonačno, jer svaki korak i svaki nivo retry-a imaju hardkodovane limite.
@@ -203,6 +226,27 @@ Poziva `search(query)` i rezultat čuva kao `last_tool_output`.
 
 #### `shell:`
 Poziva `shell(command)` i rezultat čuva kao `last_tool_output`. Ovo je najmoćniji alat, jer agentu daje direktan shell surface.
+
+Dodata je podrška za `sudo` u `tools_linux/shell.py`.
+
+Funkcija automatski pokušava da preuzme lozinku iz okruženja ili iz `.env` fajla u projektu. Podržana imena promenljivih su `SUDO_PASSWORD` i `TEST_SUDO_PASSWORD`.
+
+Primer upotrebe:
+
+```python
+from tools_linux.shell import shell
+
+# simple command
+print(shell("echo hello"))
+
+# run with sudo; password will be loaded from environment or .env if available
+print(shell("whoami", sudo=True))
+
+# you can still pass password explicitly
+print(shell("whoami", sudo=True, sudo_password="YOUR_PASSWORD"))
+```
+
+Napomena: prosleđivanje lozinki u plaintext-u nije bezbedno — preporučuje se passwordless sudo ili bezbednije metode (npr. /etc/sudoers, vault).
 
 #### `memadd:`
 Dodaje vrednost u internu memory ako se ista vrednost već ne nalazi na kraju memory stringa. Održava i `memory_items` listu u state-u.
