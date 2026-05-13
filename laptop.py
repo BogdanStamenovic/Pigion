@@ -16,10 +16,8 @@ from dotenv import load_dotenv
 # CONFIG
 # =========================
 returned_output = ""
-MEMORY_VALS = {}
 load_dotenv()
 ABS_PATH = os.getenv("ABS_PATH")
-print(ABS_PATH)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
@@ -31,12 +29,13 @@ EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "laptop_exp/exp.js
 SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
+MEMORY_VALS: Dict[str, Any] = {}
 
 
 # =========================
 # ENV LOADERS
 # =========================
-def load_tool_docs(path: str = "laptop_exp/td.txt", abs: str=ABS_PATH) -> str:
+def load_tool_docs(path: str = "laptop_exp/td.txt", abs: str = ABS_PATH) -> str:
     path = os.path.join(abs, path)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -45,8 +44,7 @@ def load_tool_docs(path: str = "laptop_exp/td.txt", abs: str=ABS_PATH) -> str:
         return "No tool docs provided."
 
 
-
-def load_env(path: str = "laptop_exp/enving.txt", abs: str=ABS_PATH) -> str:
+def load_env(path: str = "laptop_exp/enving.txt", abs: str = ABS_PATH) -> str:
     try:
         path = os.path.join(abs, path)
         with open(path, "r", encoding="utf-8") as f:
@@ -57,7 +55,8 @@ def load_env(path: str = "laptop_exp/enving.txt", abs: str=ABS_PATH) -> str:
 
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
-print (TOOL_DOCS, ENVING)
+print(TOOL_DOCS, ENVING)
+
 
 # =========================
 # TOKEN / JSON HELPERS
@@ -67,10 +66,8 @@ def count_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-
 def safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
-
 
 
 def extract_json(raw_text: str) -> Dict[str, Any]:
@@ -91,6 +88,7 @@ def extract_json(raw_text: str) -> Dict[str, Any]:
         if not isinstance(parsed, dict):
             raise ValueError("Expected top-level JSON object.")
         return parsed
+
 
 
 # =========================
@@ -228,6 +226,7 @@ class ExpStore:
         return results
 
 
+
 # =========================
 # FAILURE CLASSIFICATION
 # =========================
@@ -259,19 +258,20 @@ def infer_failure_name(action: str, error: str) -> str:
     return "generic_step_failure"
 
 
+
 # =========================
 # CLIENT INIT
 # =========================
 def init_client() -> genai.Client:
     load_dotenv()
     api_key = os.getenv("API_KEY")
-    print(api_key)
     if api_key:
         return genai.Client(api_key=api_key)
     return genai.Client()
 
 
 client = init_client()
+
 
 
 # =========================
@@ -281,7 +281,6 @@ def trim_history(action_history: List[Dict[str, Any]], keep_last: int = 8) -> Li
     if not action_history:
         return []
     return action_history[-keep_last:]
-
 
 
 def build_system_prompt(
@@ -297,17 +296,18 @@ def build_system_prompt(
 ) -> str:
     global MEMORY_VALS
     memory_vals_block = (
-    "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
-    if MEMORY_VALS
-    else ""
-)
+        "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
+        if MEMORY_VALS
+        else ""
+    )
     return f"""
 You are an autonomous agent.
 
 You MUST always respond in valid JSON.
+
 SYSTEM ENVIRONMENT:
 {ENVING}
-AVAILABLE TOOLS:
+AVAILABLE_TOOLS:
 {tool_docs}
 
 GLOBAL GOAL:
@@ -316,18 +316,8 @@ GLOBAL GOAL:
 PLAN FRAMEWORK:
 {safe_json(plan)}
 
-CURRENT STEP INDEX:
-{current_step_index}
-
-CURRENT STEP:
-{current_step}
-
 COMPLETED STEPS:
 {safe_json(completed_steps)}
-
-MEMORY:
-{memory}
-{memory_vals_block}
 
 RUNTIME STATE:
 {safe_json(state)}
@@ -335,24 +325,13 @@ RUNTIME STATE:
 RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
-TOKEN USAGE:
-- {tokens_used}/{TOKENS_PER_GOAL} tokens used so far for this goal.
-
 CORE EXECUTION RULES:
-- You have a BUDGET OF {TOKENS_PER_GOAL} TOKENS for the entire GOAL. Use them wisely.
-- There are NO subplans.
 - The PLAN FRAMEWORK is high-level guidance only.
-- You must work ONLY on the CURRENT STEP.
-- Do NOT perform work that belongs to future steps.
-- Return ONLY ONE next executable action at a time when asked.
-- After each tool result, re-evaluate whether the CURRENT STEP is complete.
-- If the CURRENT STEP is already complete, return status "done".
-- If the CURRENT STEP is blocked, return status "fail".
 - Do NOT skip ahead.
 - Do NOT optimize by doing multiple future steps early.
 - Do NOT assume hidden memory. Use only GOAL, PLAN FRAMEWORK, MEMORY, STATE, and ACTION HISTORY.
 - If you need something remembered, use the memory tool syntax (example: memadd:some value).
-- You have LIMITED state history, if a step takes many actions, you may forget early ones.
+- If a STEP has a lot of actions, you SHOULD use the MEMORY TOOL to keep track of what you've done and what you know.
 - You CANNOT access memadd files trough shell commands, write it yourself.
 - Actions must be valid tool commands (example: "shell:cat secret", "memadd:123").
 
@@ -362,6 +341,7 @@ STRICT OUTPUT RULES:
 - No explanation outside the requested JSON schema.
 - Be concise.
 """
+
 
 
 # =========================
@@ -375,7 +355,6 @@ def call_llm(prompt: str, system_prompt: str) -> Dict[str, Any]:
     full_prompt = system_prompt + "\n\n" + prompt + disclaimer
     added_tokens = count_tokens(full_prompt) + MAX_OUTPUT_TOKENS
     last_error: Optional[Exception] = None
-
     for attempt in range(1, MAX_LLM_RETRIES + 1):
         try:
             response = client.models.generate_content(
@@ -404,6 +383,7 @@ def call_llm(prompt: str, system_prompt: str) -> Dict[str, Any]:
     raise RuntimeError(f"LLM call failed after retries: {last_error}")
 
 
+
 # =========================
 # PLAN
 # =========================
@@ -428,7 +408,6 @@ Return ONLY:
 }
 
 RULES:
-- NEVER RETURN ANYTHING OTHER THAN THE JSON SCHEMA REQUESTED.
 - Steps must be high-level descriptions.
 - Steps must NOT be tool calls.
 - 3 to 7 steps maximum.
@@ -443,6 +422,7 @@ RULES:
     return steps
 
 
+
 # =========================
 # NEXT ACTION
 # =========================
@@ -454,11 +434,12 @@ def decide_next_action(
     completed_steps: List[str],
     memory: str,
     state: Dict[str, Any],
+    program_state: Dict[str, Any],
     action_history: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if state.get("force_next_action") != None:
-        helper = state["force_next_action"]
-        state["force_next_action"] = None
+    if program_state.get("force_next_action") != None:
+        helper = program_state["force_next_action"]
+        program_state["force_next_action"] = None
         return {
             "status": "ongoing",
             "reason": "Forced next action from recovery.",
@@ -502,6 +483,7 @@ RULES:
     result.setdefault("next_action", "")
 
     return result
+
 
 
 # =========================
@@ -552,12 +534,13 @@ RULES:
 - Mark "done" ONLY if the CURRENT STEP itself is complete.
 - Do NOT mark "done" because future-step work was started.
 - If the action was useful but the CURRENT STEP is not finished, return "ongoing".
-- If the action failed, violated stepscope or caused an error, return "fail".
+- If the action failed or violated step scope, return "fail".
 """
     result = call_llm(prompt, system)
     result.setdefault("status", "fail")
     result.setdefault("reason", "No reason provided")
     return result
+
 
 
 # =========================
@@ -601,7 +584,7 @@ SIMILAR PAST FAILURES:
 Return ONLY:
 {{
   "recovery": "retry | replace_step | skip_step | abort_goal",
-  "retry_step": "...",
+  "retry_action": "...",
   "new_step": "...",
   "reason": "..."
 }}
@@ -612,12 +595,15 @@ RULES:
 - Use "skip_step" only if it is truly unnecessary or already effectively complete.
 - Use "abort_goal" only if the goal cannot continue safely.
 - Prefer alternatives that resemble successful past recoveries when relevant.
+- Try to consider what the root cause may be and try to validate it.
+- Do NOT assume memory to be GROUND TRUTH.
 """
     result = call_llm(prompt, system)
     result.setdefault("recovery", "abort_goal")
     result.setdefault("new_step", current_step)
     result.setdefault("reason", "No reason provided")
     return result
+
 
 
 # =========================
@@ -662,7 +648,24 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     if action.startswith("shell:"):
         command = action[len("shell:") :].strip()
-        output = str(shell(command))
+        if "sudo" in command:
+            output = str(shell(command, sudo=True, stream=True, truncate=True))
+        else:
+            output = str(shell(command, stream=True, truncate=True))
+
+        # After executing a shell command, query the persistent shell for its cwd
+        try:
+            pwd_out = shell("pwd")
+            if isinstance(pwd_out, str):
+                # take last non-empty line as cwd
+                lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
+                if lines:
+                    new_cwd = lines[-1]
+                    local_state["cwd"] = new_cwd
+        except Exception:
+            # If anything goes wrong, keep existing cwd (or fallback to os.getcwd())
+            local_state["cwd"] = local_state.get("cwd", os.getcwd())
+
         local_state["last_tool_output"] = output
         return {
             "ok": True,
@@ -704,6 +707,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
 # =========================
 # FAILURE HELPERS
 # =========================
@@ -721,7 +725,6 @@ def build_pending_failure(
         "failed_action": failed_action,
         "created_at": time.time(),
     }
-
 
 
 def finalize_experience_if_needed(
@@ -747,7 +750,6 @@ def finalize_experience_if_needed(
         "successful_action": successful_action,
         "written_at": time.time(),
     }
-
 
 
 def recover_from_failure(
@@ -814,8 +816,41 @@ def apply_recovery_decision(
         recovery_attempts += 1
         if recovery_attempts > MAX_RECOVERY_ATTEMPTS:
             raise RuntimeError(f"Too many recovery attempts for step: {current_step}")
+        # If we have a retry action, try to find which past similarity entry
+        # corresponds best to that retry. Keep only that entry in state
+        # `last_similar_failures` so downstream logic sees the single best match.
+        retry_action = recovery.get("retry_action", None)
+        try:
+            if retry_action:
+                candidates = state.get("last_similar_failures") or []
+                best: Optional[Dict[str, Any]] = None
+                best_score = -1.0
+                retry_vec = _vectorize(str(retry_action))
+
+                for entry in candidates:
+                    parts = [str(entry.get("alternative", "")), str(entry.get("failed_action", "")), str(entry.get("reason", "")), str(entry.get("step", ""))]
+                    candidate_text = " ".join([p for p in parts if p])
+                    if not candidate_text:
+                        continue
+                    score = _cosine_sparse(retry_vec, _vectorize(candidate_text))
+                    if score > best_score:
+                        best_score = score
+                        best = dict(entry)
+
+                if best is not None:
+                    best["retry_match_score"] = round(best_score, 4)
+                    state["last_similar_failures"] = [best]
+                    print(f"🔎 Kept best matching past failure: {best.get('name')} score={best['retry_match_score']}")
+                else:
+                    state["last_similar_failures"] = []
+                    print("🔎 No matching past failure found for retry action; cleared last_similar_failures")
+            else:
+                state["last_similar_failures"] = []
+        except Exception as e:
+            print(f"Error while matching retry action to past failures: {e}")
+
         return {
-            "force_next_action": recovery.get("retry_step", None),
+            "force_next_action": recovery.get("retry_action", None),
             "recovery_attempts": recovery_attempts,
             "step_done": False,
             "current_step": current_step,
@@ -856,24 +891,27 @@ def apply_recovery_decision(
     )
 
 
+
 # =========================
 # MAIN LOOP
 # =========================
 def run_agent(goal: str) -> None:
-    global returned_output, tokens_used, MEMORY_VALS
+    global returned_output, tokens_used
     returned_output = ""
     tokens_used = 0
 
     exp_store = ExpStore(EXP_DB_PATH)
     memory = ""
-    state: Dict[str, Any] = {
+    agent_state: Dict[str, Any] = {
         "memory": memory,
         "MEMORYVALS": MEMORY_VALS,
         "last_action": None,
         "last_tool_output": None,
         "pending_failure": None,
         "last_similar_failures": [],
-        "exp_db_path": EXP_DB_PATH,
+        "cwd": os.getcwd(),
+    }
+    program_state: Dict[str, Any] = {
         "exp_cache_loaded": len(exp_store.entries),
         "force_next_action": None,
     }
@@ -881,7 +919,7 @@ def run_agent(goal: str) -> None:
     print("\n🚀 START: Initializing agent for goal")
     print("📋 PLAN GENERATION: Creating plan framework")
 
-    steps = create_plan(goal, memory=memory, state=state)
+    steps = create_plan(goal, memory=memory, state=agent_state)
     completed_steps: List[str] = []
 
     print("PLAN:", steps)
@@ -901,6 +939,7 @@ def run_agent(goal: str) -> None:
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
+            print(MEMORY_VALS)
             print(
                 f"🔄 ACTION ROUND {round_index + 1}/{MAX_ACTIONS_PER_STEP} tokens_used={tokens_used}"
             )
@@ -917,8 +956,9 @@ def run_agent(goal: str) -> None:
                 current_step=current_step,
                 completed_steps=completed_steps,
                 memory=memory,
-                state=state,
+                state=agent_state,
                 action_history=action_history,
+                program_state=program_state,
             )
 
             status = str(decision.get("status", "")).strip().lower()
@@ -928,12 +968,12 @@ def run_agent(goal: str) -> None:
             if status == "done":
                 print(f"✅ STEP DONE: {current_step}")
                 if next_action.startswith("return:"):
-                    tool_result = run_tool(next_action, memory, state)
+                    tool_result = run_tool(next_action, memory, agent_state)
                     memory = tool_result["memory"]
-                    state = tool_result["state"]
-                    finalize_experience_if_needed(exp_store, state, next_action)
+                    agent_state = tool_result["state"]
+                    finalize_experience_if_needed(exp_store, agent_state, next_action)
                 else:
-                    state["pending_failure"] = None
+                    agent_state["pending_failure"] = None
 
                 step_done = True
                 completed_steps.append(current_step)
@@ -949,7 +989,7 @@ def run_agent(goal: str) -> None:
                     current_step=current_step,
                     completed_steps=completed_steps,
                     memory=memory,
-                    state=state,
+                    state=agent_state,
                     action_history=action_history,
                     error=reason,
                     exp_store=exp_store,
@@ -964,10 +1004,10 @@ def run_agent(goal: str) -> None:
                     completed_steps=completed_steps,
                     action_history=action_history,
                     recovery_attempts=recovery_attempts,
-                    state=state,
+                    state=agent_state,
                 )
                 if "force_next_action" in recovery_result:
-                    state["force_next_action"] = recovery_result["force_next_action"]
+                    program_state["force_next_action"] = recovery_result["force_next_action"]
                 recovery_attempts = int(recovery_result["recovery_attempts"])
                 current_step = str(recovery_result["current_step"])
 
@@ -982,9 +1022,9 @@ def run_agent(goal: str) -> None:
             if not next_action:
                 raise RuntimeError(f"Model returned empty next_action while status was '{status}'")
 
-            tool_result = run_tool(next_action, memory, state)
+            tool_result = run_tool(next_action, memory, agent_state)
             memory = tool_result["memory"]
-            state = tool_result["state"]
+            agent_state = tool_result["state"]
             tool_output = str(tool_result["output"])
 
             action_history.append(
@@ -1001,7 +1041,7 @@ def run_agent(goal: str) -> None:
                 current_step=current_step,
                 completed_steps=completed_steps,
                 memory=memory,
-                state=state,
+                state=agent_state,
                 action_history=action_history,
                 action=next_action,
                 tool_output=tool_output,
@@ -1009,11 +1049,11 @@ def run_agent(goal: str) -> None:
 
             eval_status = str(evaluation.get("status", "")).strip().lower()
             eval_reason = str(evaluation.get("reason", "No reason provided"))
-            print(MEMORY_VALS)
+
             if eval_status == "done":
                 print(f"✅ STEP COMPLETE AFTER ACTION: {next_action}")
-                finalize_experience_if_needed(exp_store, state, next_action)
-                state["exp_cache_loaded"] = len(exp_store.entries)
+                finalize_experience_if_needed(exp_store, agent_state, next_action)
+                program_state["exp_cache_loaded"] = len(exp_store.entries)
                 step_done = True
                 completed_steps.append(current_step)
                 current_step_index += 1
@@ -1028,7 +1068,7 @@ def run_agent(goal: str) -> None:
                     current_step=current_step,
                     completed_steps=completed_steps,
                     memory=memory,
-                    state=state,
+                    state=agent_state,
                     action_history=action_history,
                     error=eval_reason,
                     exp_store=exp_store,
@@ -1043,10 +1083,10 @@ def run_agent(goal: str) -> None:
                     completed_steps=completed_steps,
                     action_history=action_history,
                     recovery_attempts=recovery_attempts,
-                    state=state,
+                    state=agent_state,
                 )
                 if "force_next_action" in recovery_result:
-                    state["force_next_action"] = recovery_result["force_next_action"]
+                    program_state["force_next_action"] = recovery_result["force_next_action"]
 
                 recovery_attempts = int(recovery_result["recovery_attempts"])
                 current_step = str(recovery_result["current_step"])
@@ -1066,16 +1106,15 @@ def run_agent(goal: str) -> None:
                 f"Step did not finish within MAX_ACTIONS_PER_STEP={MAX_ACTIONS_PER_STEP}: {current_step}"
             )
 
-    print(f"Returned output from agent: {returned_output}")
+    print(f"\n\n\n\n\nReturned output from agent: {returned_output}")
     print(
         f"\n🏁 GOAL FINISHED: Agent execution completed and used up:{tokens_used}/{TOKENS_PER_GOAL} tokens for this goal."
     )
     print("\n🧠 FINAL MEMORY:")
     print(memory)
-    print("\n📊 MEMORY VALUES:")
-    print(MEMORY_VALS)
     print("\n📦 FINAL STATE:")
-    print(safe_json(state))
+    print(safe_json(agent_state), "\n\n\n\nPROGRAM STATE:", safe_json(program_state))
+
 
 
 # =========================

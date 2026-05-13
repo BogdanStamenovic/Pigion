@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urlparse
+import time
 
 from ddgs import DDGS
 
@@ -29,7 +30,7 @@ def _is_url(value: str) -> bool:
 def search(
     payload: str | dict[str, Any] | None = None,
     *,
-    max_results: int = 3,
+    max_results: int = 7,
     max_chars: int = 3000,
     region: str = "us-en",
 ) -> dict[str, Any]:
@@ -86,6 +87,34 @@ def search(
                     "snippet": item.get("body") or item.get("content") or "",
                 }
             )
+
+        # Ako nema rezultata, pokušaj test pitanje da detektuje rate limit
+        if len(normalized) == 0:
+            test_query = "whats the capital of france"
+            try:
+                test_results = ddgs.text(
+                    query=test_query,
+                    region=region,
+                    safesearch="moderate",
+                    max_results=1,
+                    backend="duckduckgo",
+                )
+                test_normalized = []
+                for i, item in enumerate(test_results, start=1):
+                    test_normalized.append(
+                        {
+                            "rank": i,
+                            "title": item.get("title", ""),
+                            "url": item.get("href") or item.get("url") or "",
+                            "snippet": item.get("body") or item.get("content") or "",
+                        }
+                    )
+            except Exception:
+                test_normalized = []
+
+            if len(test_normalized) == 0:
+                print("waiting for 30 seconds rate limited.")
+                time.sleep(30)
 
         return {
             "ok": True,

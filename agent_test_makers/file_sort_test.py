@@ -1,6 +1,6 @@
 # small_test_generator.py
 # Creates a folder named "test" and fills it with a few sample files.
-
+from pi import run_agent
 from pathlib import Path
 
 # Create the folder
@@ -23,3 +23,5 @@ for filename, content in files.items():
     file_path.write_text(content)
 
 print(f"Created folder '{test_folder}' with {len(files)} files.")
+
+run_agent("Sort the files in the test folder into subfolder based on their type.")

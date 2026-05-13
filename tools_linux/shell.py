@@ -1,6 +1,7 @@
 import os
 import pty
 import select
+import sys
 import signal
 import threading
 import shlex
@@ -16,6 +17,58 @@ _LOCK = threading.Lock()
 _START_CWD = os.getcwd()
 _DOTENV_LOADED = False
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MAX_SHELL_OUTPUT_CHARS = int(os.environ.get("MAX_SHELL_OUTPUT", "200000"))
+DEFAULT_TAIL_LINES = int(os.environ.get("SHELL_TAIL_LINES", "50"))
+TRUNCATE_MIN_LINES = int(os.environ.get("SHELL_TRUNCATE_MIN_LINES", "20"))
+TRUNCATE_EXEMPT_COMMANDS = {
+    "cat",
+    "echo",
+    "printf",
+    "head",
+    "tail",
+    "sed",
+    "awk",
+    "grep",
+    "less",
+    "more",
+    "cut",
+    "tr",
+    "pv",
+    "watch",
+}
+
+# Per-command truncation/filtering policies. Keys are compiled regexes
+# that match the command string. Policies contain `suppress_patterns` (list
+# of regex strings to remove) and an optional `tail_lines` fallback.
+DEFAULT_TRUNCATION_POLICIES = {
+    re.compile(r"\bnmap\b"): {
+        "suppress_patterns": [
+            r"^\s*Starting Nmap.*$",
+            r"^\s*Initiating.*$",
+            r"^\s*Completed.*$",
+            r"\d+%|[\r\x08]",
+            r"^\s*Timing:.*$",
+            r"^\s*RTT.*$",
+        ],
+        "tail_lines": 50,
+    },
+    re.compile(r"\bapt\b|\bapt-get\b"): {
+        "suppress_patterns": [
+            r"^\s*Get:\s*",
+            r"^\s*Downloading.*$",
+            r"^\s*Fetched.*$",
+            r"^\s*Reading package lists.*$",
+            r"^\s*Building dependency tree.*$",
+            r"^\s*Reading state information.*$",
+            r"^\s*\d+%.*$",
+            r"^\s*Preparing to unpack.*$",
+            r"^\s*Unpacking.*$",
+            r"^\s*Setting up.*$",
+            r"^\s*Processing triggers for.*$",
+        ],
+        "tail_lines": 50,
+    },
+}
 
 
 def _shell_alive():
@@ -193,7 +246,107 @@ def _load_dotenv(path: str) -> None:
         return
 
 
-def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout: float = 1.0):
+def _match_truncation_policy(command_str: str):
+    if not command_str:
+        return None
+    for pat, policy in DEFAULT_TRUNCATION_POLICIES.items():
+        try:
+            if pat.search(command_str):
+                return policy
+        except Exception:
+            continue
+    return None
+
+
+def _is_truncation_exempt(command_str: str) -> bool:
+    """Return True if the command is a simple utility that should not be truncated."""
+    if not command_str:
+        return False
+    try:
+        tokens = shlex.split(command_str)
+    except Exception:
+        tokens = command_str.split()
+    if not tokens:
+        return False
+    # skip leading sudo
+    tok = tokens[0]
+    if tok == "sudo" and len(tokens) > 1:
+        tok = tokens[1]
+    # If the command is a shell -c wrapper, try to inspect the executed token.
+    if tok in ("sh", "bash") and "-c" in tokens:
+        try:
+            cidx = tokens.index("-c")
+            cmd_str = tokens[cidx + 1] if cidx + 1 < len(tokens) else ""
+            try:
+                inner = shlex.split(cmd_str)[0] if cmd_str else ""
+            except Exception:
+                inner = cmd_str.split()[0] if cmd_str else ""
+            tok = inner or tok
+        except Exception:
+            pass
+    return tok in TRUNCATE_EXEMPT_COMMANDS
+
+
+def _apply_truncation(output: str, policy: dict | None, tail_lines: int | None, force_tail: bool = False):
+    if not output:
+        return output
+
+    original_len = len(output)
+    max_chars = MAX_SHELL_OUTPUT_CHARS
+    effective_tail = tail_lines if tail_lines is not None else DEFAULT_TAIL_LINES
+
+    lines = output.splitlines()
+
+    if policy:
+        suppress = policy.get("suppress_patterns", [])
+        compiled = []
+        for p in suppress:
+            try:
+                compiled.append(re.compile(p))
+            except re.error:
+                try:
+                    compiled.append(re.compile(re.escape(p)))
+                except re.error:
+                    pass
+
+        filtered = []
+        for ln in lines:
+            if not ln.strip():
+                continue
+            skip = False
+            for cre in compiled:
+                try:
+                    if cre.search(ln):
+                        skip = True
+                        break
+                except Exception:
+                    continue
+            if not skip:
+                filtered.append(ln)
+    else:
+        filtered = [ln for ln in lines if ln.strip() != ""]
+
+    # If caller asked to force tailing, or suppression removed everything,
+    # return the last `effective_tail` non-empty lines.
+    if not filtered or (not policy and force_tail):
+        nonempty = [ln for ln in lines if ln.strip() != ""]
+        keep = nonempty[-effective_tail:] if effective_tail and len(nonempty) > effective_tail else nonempty
+        res = "\n".join(keep).strip()
+    else:
+        res = "\n".join(filtered).strip()
+        if len(res) > max_chars:
+            nonempty = [ln for ln in res.splitlines() if ln.strip() != ""]
+            keep = nonempty[-effective_tail:] if effective_tail and len(nonempty) > effective_tail else nonempty
+            res = "\n".join(keep).strip()
+
+    if original_len > len(res):
+        omitted = original_len - len(res)
+        res = res + f"\n[...OUTPUT TRUNCATED: {omitted} chars omitted...]\n"
+
+    return res
+
+
+def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout: float = 1.0, stream: bool = True, truncate: bool = False, truncate_policy: dict | None = None, tail_lines: int | None = None):
     """Execute a shell `command` in a persistent pty-backed bash.
 
     If `sudo` is True and `sudo_password` is provided, the function will
@@ -255,41 +408,65 @@ def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout
             # and return its output directly (avoids PTY prompt noise).
             if sudo_password is not None:
                 # Build the command string to execute under /bin/bash -c
-                # If the user already prefixed with sudo, use the original command
-                # otherwise prefix with sudo -S -p ''
                 try:
                     first_tok = tokens[0]
                 except Exception:
                     first_tok = None
 
                 if first_tok == "sudo":
-                    # Reconstruct the rest of the original sudo invocation and
-                    # ensure `-S -p ''` is present so sudo reads password from
-                    # stdin and does not emit a prompt string.
                     if len(tokens) > 1:
                         rest_join = shlex.join(tokens[1:])
                         full_cmd = f"sudo -S -p '' {rest_join}"
                     else:
-                        # fallback to previously-computed rest_command
                         full_cmd = f"sudo -S -p '' {rest_command}"
                 else:
-                    # note: rest_command already contains the intended command
                     full_cmd = f"sudo -S -p '' {rest_command}"
 
-                # Execute using subprocess to capture exact stdout+stderr
-                proc = subprocess.run(
+                # Use Popen so we can stream stdout while supplying the
+                # password on stdin immediately. This allows callers to see
+                # incremental output for long-running commands.
+                proc = subprocess.Popen(
                     full_cmd,
                     shell=True,
                     cwd=_START_CWD,
                     env=os.environ.copy(),
-                    input=(sudo_password + "\n").encode("utf-8"),
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     executable="/bin/bash",
+                    bufsize=1,
+                    universal_newlines=True,
                 )
 
-                out = proc.stdout.decode("utf-8", errors="replace")
-                return _sanitize_output(out, sudo_password, None)
+                # Send the password early so sudo can consume it when needed.
+                try:
+                    if proc.stdin and sudo_password is not None:
+                        proc.stdin.write(sudo_password + "\n")
+                        proc.stdin.flush()
+                except Exception:
+                    pass
+
+                out_chunks = []
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        out_chunks.append(line)
+                        if stream:
+                            try:
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
+                            except Exception:
+                                pass
+
+                proc.wait()
+                raw_out = "".join(out_chunks)
+                policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
+                nonempty = [ln for ln in raw_out.splitlines() if ln.strip() != ""]
+                should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(command))
+                if should_trunc:
+                    processed = _apply_truncation(raw_out, policy, tail_lines, force_tail=truncate)
+                else:
+                    processed = raw_out
+                return _sanitize_output(processed, sudo_password, None)
 
             # Non-interactive sudo: don't prompt for password (use PTY)
             escaped = _escape_single_quotes(rest_command)
@@ -328,6 +505,20 @@ def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout
             output.append(chunk)
             buffer += chunk
 
+            # Stream to local stdout immediately if requested
+            if stream and chunk:
+                try:
+                    if marker in chunk:
+                        to_print = chunk.split(marker)[0]
+                    else:
+                        to_print = chunk
+                    # Print raw chunk so interactive programs (like nmap)
+                    # retain their formatting/animation.
+                    sys.stdout.write(to_print)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
             # If we detect the sudo prompt and have a password, send it once
             if sudo_prompt and (sudo_prompt in buffer) and (not password_sent):
                 if (not piped_pw) and (sudo_password is not None):
@@ -343,6 +534,15 @@ def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout
 
         # Remove marker and everything after it
         result = result.split(marker)[0]
+
+        # Apply truncation/filtering to the returned value only (streaming
+        # remains unchanged by default). If the caller supplied a
+        # `truncate_policy` or `truncate=True`, apply the matched policy.
+        policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
+        nonempty = [ln for ln in result.splitlines() if ln.strip() != ""]
+        should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(command))
+        if should_trunc:
+            result = _apply_truncation(result, policy, tail_lines, force_tail=truncate)
 
         # Sanitize PTY output for control sequences and sudo noise
         return _sanitize_output(result, sudo_password, sudo_prompt)
