@@ -646,18 +646,18 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             output = str(shell(command, stream=True, truncate=True))
 
-        # After executing a shell command, query the persistent shell for its cwd
+        # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
         try:
             pwd_out = shell("pwd")
             if isinstance(pwd_out, str):
-                # take last non-empty line as cwd
+                # take last non-empty line as CURRENT_WORKING_DIRECTORY
                 lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
                 if lines:
                     new_cwd = lines[-1]
-                    local_state["cwd"] = new_cwd
+                    local_state["CURRENT_WORKING_DIRECTORY"] = new_cwd
         except Exception:
-            # If anything goes wrong, keep existing cwd (or fallback to os.getcwd())
-            local_state["cwd"] = local_state.get("cwd", os.getcwd())
+            # If anything goes wrong, keep existing CURRENT_WORKING_DIRECTORY (or fallback to os.getcwd())
+            local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
 
         local_state["last_tool_output"] = output
         return {
@@ -904,7 +904,7 @@ def run_agent(goal: str) -> None:
         "last_tool_output": None,
         "pending_failure": None,
         "last_similar_failures": [],
-        "cwd": os.getcwd(),
+        "CURRENT_WORKING_DIRECTORY": os.getcwd(),
     }
     program_state: Dict[str, Any] = {
         "exp_cache_loaded": len(exp_store.entries),
