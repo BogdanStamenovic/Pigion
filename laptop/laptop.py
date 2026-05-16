@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 from google import genai
 from google.genai import types
 
-from tools_windows.shell import shell
-from tools_windows.search import search
+from laptop.tools_windows.shell import shell
+from laptop.tools_windows.search import search
 from dotenv import load_dotenv
 
 # =========================
