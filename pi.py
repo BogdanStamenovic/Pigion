@@ -324,6 +324,9 @@ RUNTIME STATE:
 RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
+CURRENT WORKING DIRECTORY:
+{state.get("CURRENT_WORKING_DIRECTORY", "")}
+
 CORE EXECUTION RULES:
 - The PLAN FRAMEWORK is high-level guidance only.
 - Do NOT skip ahead.
@@ -1117,7 +1120,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "cd into the test directory, and then cat the file named secret.txt")
+            "where are you right now?")
     finally:
         try:
             client.close()
