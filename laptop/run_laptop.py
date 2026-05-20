@@ -1,23 +1,35 @@
 import json
 import math
-import os
+import os  # Kept here
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
-
-from laptop.tools_windows.shell import shell
-from laptop.tools_windows.search import search
 from dotenv import load_dotenv
+from importlib import import_module
+
+# =========================
+# FIX PATH
+# =========================
+import sys
+# Removed the second 'import os' line from here
+
+# Get the directory above the current folder
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Inject it into Python's lookup path if it isn't already there
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
 
 # =========================
 # CONFIG
 # =========================
 returned_output = ""
 load_dotenv()
-ABS_PATH = os.getenv("ABS_PATH")
+NAME = "laptop"
+ABS_PATH = os.path.join(os.getenv("ABS_PATH"), NAME)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
@@ -25,17 +37,31 @@ MAX_ACTIONS_PER_STEP = int(os.getenv("MAX_ACTIONS_PER_STEP", "12"))
 MAX_LLM_RETRIES = int(os.getenv("MAX_LLM_RETRIES", "6"))
 MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "6"))
 TOKENS_PER_GOAL = int(os.getenv("TOKENS_PER_GOAL", "100000"))
-EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "laptop_exp/exp.jsonl"))
+EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "exp/exp.jsonl"))
 SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
 MEMORY_VALS: Dict[str, Any] = {}
 
-
 # =========================
 # ENV LOADERS
 # =========================
-def load_tool_docs(path: str = "laptop_exp/td.txt", abs: str = ABS_PATH) -> str:
+def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path' to avoid shadowing built-in abs()
+    path = os.path.join(abs_path, "exp/tool_import.txt")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            a = f.read()
+            # Removed redundant f.close() as 'with' handles it automatically
+        to_import = a.split()
+        tools = {}
+        for imp in to_import:
+            print(f"tools.{imp}")
+            tools[imp] = import_module(f"{NAME}.tools.{imp}")
+            tools[imp] = getattr(tools[imp], imp)
+        return tools
+    except FileNotFoundError:
+        raise ImportError(f"Tool import file not found at {path}. Ensure that 'tool_import.txt' exists and lists the tools to import.")
+def load_tool_docs(path: str = "exp/td.txt", abs: str = ABS_PATH) -> str:
     path = os.path.join(abs, path)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -44,7 +70,7 @@ def load_tool_docs(path: str = "laptop_exp/td.txt", abs: str = ABS_PATH) -> str:
         return "No tool docs provided."
 
 
-def load_env(path: str = "laptop_exp/enving.txt", abs: str = ABS_PATH) -> str:
+def load_env(path: str = "exp/enving.txt", abs: str = ABS_PATH) -> str:
     try:
         path = os.path.join(abs, path)
         with open(path, "r", encoding="utf-8") as f:
@@ -55,6 +81,7 @@ def load_env(path: str = "laptop_exp/enving.txt", abs: str = ABS_PATH) -> str:
 
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
+TOOLS = tool_import(ABS_PATH)
 print(TOOL_DOCS, ENVING)
 
 
@@ -638,7 +665,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     if action.startswith("search:"):
         query = action[len("search:") :].strip()
-        output = str(search(query))
+        output = str(TOOLS["search"](query))
         local_state["last_tool_output"] = output
         return {
             "ok": True,
@@ -650,13 +677,13 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
     if action.startswith("shell:"):
         command = action[len("shell:") :].strip()
         if "sudo" in command:
-            output = str(shell(command))
+            output = str(TOOLS["shell"](command))
         else:
-            output = str(shell(command))
+            output = str(TOOLS["shell"](command))
 
         # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
         try:
-            pwd_out = shell("pwd")
+            pwd_out = TOOLS["shell"]("pwd")
             if isinstance(pwd_out, str):
                 # take last non-empty line as CURRENT_WORKING_DIRECTORY
                 lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
@@ -844,7 +871,7 @@ def apply_recovery_decision(
                     print(f"🔎 Kept best matching past failure: {best.get('name')} score={best['retry_match_score']}")
                 else:
                     state["last_similar_failures"] = []
-                    print("🔎 No matching past failure found for retry action; cleared last_similar_failures")
+                    print("🔎 No matching past failure found for retry action; Kept all of them, here they are: ", state["last_similar_failures"])
             else:
                 state["last_similar_failures"] = []
         except Exception as e:

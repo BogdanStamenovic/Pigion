@@ -1,6 +1,6 @@
 # small_test_generator.py
 # Creates a folder named "test" and fills it with a few sample files.
-from pi import run_agent
+from laptop.run_laptop import run_agent
 from pathlib import Path
 
 # Create the folder
