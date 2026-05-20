@@ -1,0 +1,2 @@
+OS: Kali GNU/Linux Rolling
+TERMINAL: zsh
