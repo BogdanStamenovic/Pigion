@@ -26,7 +26,7 @@ def _is_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def search(
+def run_search(
     payload: str | dict[str, Any] | None = None,
     *,
     max_results: int = 7,
@@ -130,3 +130,13 @@ def search(
             "input": query,
             "error": f"{type(e).__name__}: {e}",
         }
+def search(command, memory, local_state):
+    local_state=dict(local_state)  # Make a copy to avoid mutating the original
+    output = str(run_search(command))
+    local_state["last_tool_output"] = output
+    return {
+            "ok": True,
+            "output": output,
+            "memory": memory,
+            "state": local_state,
+    }

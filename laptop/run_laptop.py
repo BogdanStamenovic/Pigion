@@ -321,12 +321,6 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
-    global MEMORY_VALS
-    memory_vals_block = (
-        "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
-        if MEMORY_VALS
-        else ""
-    )
     return f"""
 You are an autonomous agent.
 
@@ -663,68 +657,10 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "state": local_state,
         }
 
-    if action.startswith("search:"):
-        query = action[len("search:") :].strip()
-        output = str(TOOLS["search"](query))
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
-
-    if action.startswith("shell:"):
-        command = action[len("shell:") :].strip()
-        if "sudo" in command:
-            output = str(TOOLS["shell"](command))
-        else:
-            output = str(TOOLS["shell"](command))
-
-        # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
-        try:
-            pwd_out = TOOLS["shell"]("pwd")
-            if isinstance(pwd_out, str):
-                # take last non-empty line as CURRENT_WORKING_DIRECTORY
-                lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
-                if lines:
-                    new_cwd = lines[-1]
-                    local_state["CURRENT_WORKING_DIRECTORY"] = new_cwd
-        except Exception:
-            # If anything goes wrong, keep existing CURRENT_WORKING_DIRECTORY (or fallback to os.getcwd())
-            local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
-
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
-
-    if action.startswith("memadd:"):
-        value = action[len("memadd:") :].strip()
-        existing_lines = [line for line in memory.splitlines() if line.strip()]
-        if existing_lines and existing_lines[-1] == value:
-            new_memory = memory
-            output = "MEMORY_ALREADY_ENDED_WITH_SAME_VALUE"
-        elif "=" in value:
-            global MEMORY_VALS
-            key, val = value.split("=", 1)
-            MEMORY_VALS[key] = val
-            new_memory = memory
-            output = f"MEMORY_KEY_UPDATED: {key} to {val}"
-        else:
-            new_memory = (memory + "\n" + value).strip() if memory else value
-            output = "MEMORY_UPDATED"
-
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": new_memory,
-            "state": local_state,
-        }
+    parts = action.split(":", 1)
+    if len(parts) == 2:
+        prefix, suffix = parts
+        return TOOLS[prefix](suffix, memory, local_state)
 
     local_state["last_tool_output"] = "UNKNOWN_TOOL"
     return {
@@ -967,7 +903,7 @@ def run_agent(goal: str) -> None:
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
-            print(MEMORY_VALS)
+            print(agent_state)
             print(
                 f"🔄 ACTION ROUND {round_index + 1}/{MAX_ACTIONS_PER_STEP} tokens_used={tokens_used}"
             )
