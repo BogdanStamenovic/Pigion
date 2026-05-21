@@ -1,23 +1,35 @@
 import json
 import math
-import os
+import os  # Kept here
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
-
-from tools_linux.shell import shell
-from tools_linux.search import search
 from dotenv import load_dotenv
+from importlib import import_module
+
+# =========================
+# FIX PATH
+# =========================
+import sys
+# Removed the second 'import os' line from here
+
+# Get the directory above the current folder
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Inject it into Python's lookup path if it isn't already there
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
 
 # =========================
 # CONFIG
 # =========================
 returned_output = ""
 load_dotenv()
-ABS_PATH = os.getenv("ABS_PATH")
+NAME = "pi"
+ABS_PATH = os.path.join(os.getenv("ABS_PATH"), NAME)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
@@ -25,17 +37,31 @@ MAX_ACTIONS_PER_STEP = int(os.getenv("MAX_ACTIONS_PER_STEP", "12"))
 MAX_LLM_RETRIES = int(os.getenv("MAX_LLM_RETRIES", "6"))
 MAX_RECOVERY_ATTEMPTS = int(os.getenv("MAX_RECOVERY_ATTEMPTS", "6"))
 TOKENS_PER_GOAL = int(os.getenv("TOKENS_PER_GOAL", "100000"))
-EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "pi_exp/exp.jsonl"))
+EXP_DB_PATH = os.getenv("EXP_DB_PATH", os.path.join(ABS_PATH, "exp/exp.jsonl"))
 SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
-MEMORY_VALS = {}
-
+MEMORY_VALS: Dict[str, Any] = {}
 
 # =========================
 # ENV LOADERS
 # =========================
-def load_tool_docs(path: str = "pi_exp/td.txt", abs: str=ABS_PATH) -> str:
+def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path' to avoid shadowing built-in abs()
+    path = os.path.join(abs_path, "exp/tool_import.txt")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            a = f.read()
+            # Removed redundant f.close() as 'with' handles it automatically
+        to_import = a.split()
+        tools = {}
+        for imp in to_import:
+            print(f"tools.{imp}")
+            tools[imp] = import_module(f"{NAME}.tools.{imp}")
+            tools[imp] = getattr(tools[imp], imp)
+        return tools
+    except FileNotFoundError:
+        raise ImportError(f"Tool import file not found at {path}. Ensure that 'tool_import.txt' exists and lists the tools to import.")
+def load_tool_docs(path: str = "exp/td.txt", abs: str = ABS_PATH) -> str:
     path = os.path.join(abs, path)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -44,8 +70,7 @@ def load_tool_docs(path: str = "pi_exp/td.txt", abs: str=ABS_PATH) -> str:
         return "No tool docs provided."
 
 
-
-def load_env(path: str = "pi_exp/enving.txt", abs: str=ABS_PATH) -> str:
+def load_env(path: str = "exp/enving.txt", abs: str = ABS_PATH) -> str:
     try:
         path = os.path.join(abs, path)
         with open(path, "r", encoding="utf-8") as f:
@@ -56,7 +81,9 @@ def load_env(path: str = "pi_exp/enving.txt", abs: str=ABS_PATH) -> str:
 
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
-print (TOOL_DOCS, ENVING)
+TOOLS = tool_import(ABS_PATH)
+print(TOOL_DOCS, ENVING)
+
 
 # =========================
 # TOKEN / JSON HELPERS
@@ -66,10 +93,8 @@ def count_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-
 def safe_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
-
 
 
 def extract_json(raw_text: str) -> Dict[str, Any]:
@@ -90,6 +115,7 @@ def extract_json(raw_text: str) -> Dict[str, Any]:
         if not isinstance(parsed, dict):
             raise ValueError("Expected top-level JSON object.")
         return parsed
+
 
 
 # =========================
@@ -227,6 +253,7 @@ class ExpStore:
         return results
 
 
+
 # =========================
 # FAILURE CLASSIFICATION
 # =========================
@@ -258,6 +285,7 @@ def infer_failure_name(action: str, error: str) -> str:
     return "generic_step_failure"
 
 
+
 # =========================
 # CLIENT INIT
 # =========================
@@ -272,6 +300,7 @@ def init_client() -> genai.Client:
 client = init_client()
 
 
+
 # =========================
 # PROMPT BUILDING
 # =========================
@@ -279,7 +308,6 @@ def trim_history(action_history: List[Dict[str, Any]], keep_last: int = 8) -> Li
     if not action_history:
         return []
     return action_history[-keep_last:]
-
 
 
 def build_system_prompt(
@@ -306,7 +334,7 @@ You MUST always respond in valid JSON.
 
 SYSTEM ENVIRONMENT:
 {ENVING}
-AVAILABLE TOOLS:
+AVAILABLE_TOOLS:
 {tool_docs}
 
 GLOBAL GOAL:
@@ -340,6 +368,7 @@ STRICT OUTPUT RULES:
 - No explanation outside the requested JSON schema.
 - Be concise.
 """
+
 
 
 # =========================
@@ -381,6 +410,7 @@ def call_llm(prompt: str, system_prompt: str) -> Dict[str, Any]:
     raise RuntimeError(f"LLM call failed after retries: {last_error}")
 
 
+
 # =========================
 # PLAN
 # =========================
@@ -417,6 +447,7 @@ RULES:
     if not isinstance(steps, list) or not steps:
         raise ValueError(f"Invalid plan returned: {result}")
     return steps
+
 
 
 # =========================
@@ -481,6 +512,7 @@ RULES:
     return result
 
 
+
 # =========================
 # EVALUATE ACTION
 # =========================
@@ -537,6 +569,7 @@ RULES:
     return result
 
 
+
 # =========================
 # FAILURE RECOVERY
 # =========================
@@ -552,6 +585,7 @@ def recover_step(
     error: str,
     similar_failures: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    print(similar_failures)
     system = build_system_prompt(
         goal=goal,
         plan=plan,
@@ -599,6 +633,7 @@ RULES:
     return result
 
 
+
 # =========================
 # TOOL EXECUTION
 # =========================
@@ -630,7 +665,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     if action.startswith("search:"):
         query = action[len("search:") :].strip()
-        output = str(search(query))
+        output = str(TOOLS["search"](query))
         local_state["last_tool_output"] = output
         return {
             "ok": True,
@@ -642,13 +677,13 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
     if action.startswith("shell:"):
         command = action[len("shell:") :].strip()
         if "sudo" in command:
-            output = str(shell(command, sudo=True, stream=True, truncate=True))
+            output = str(TOOLS["shell"](command))
         else:
-            output = str(shell(command, stream=True, truncate=True))
+            output = str(TOOLS["shell"](command))
 
         # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
         try:
-            pwd_out = shell("pwd")
+            pwd_out = TOOLS["shell"]("pwd")
             if isinstance(pwd_out, str):
                 # take last non-empty line as CURRENT_WORKING_DIRECTORY
                 lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
@@ -700,6 +735,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
 # =========================
 # FAILURE HELPERS
 # =========================
@@ -717,7 +753,6 @@ def build_pending_failure(
         "failed_action": failed_action,
         "created_at": time.time(),
     }
-
 
 
 def finalize_experience_if_needed(
@@ -743,7 +778,6 @@ def finalize_experience_if_needed(
         "successful_action": successful_action,
         "written_at": time.time(),
     }
-
 
 
 def recover_from_failure(
@@ -822,7 +856,6 @@ def apply_recovery_decision(
                 retry_vec = _vectorize(str(retry_action))
 
                 for entry in candidates:
-                    # Build a text blob from available fields to compare against the retry action
                     parts = [str(entry.get("alternative", "")), str(entry.get("failed_action", "")), str(entry.get("reason", "")), str(entry.get("step", ""))]
                     candidate_text = " ".join([p for p in parts if p])
                     if not candidate_text:
@@ -838,9 +871,8 @@ def apply_recovery_decision(
                     print(f"🔎 Kept best matching past failure: {best.get('name')} score={best['retry_match_score']}")
                 else:
                     state["last_similar_failures"] = []
-                    print("🔎 No matching past failure found for retry action; cleared last_similar_failures")
+                    print("🔎 No matching past failure found for retry action; Kept all of them, here they are: ", state["last_similar_failures"])
             else:
-                # No retry action provided; clear similar failures to avoid confusion
                 state["last_similar_failures"] = []
         except Exception as e:
             print(f"Error while matching retry action to past failures: {e}")
@@ -885,6 +917,7 @@ def apply_recovery_decision(
     raise RuntimeError(
         f"Agent aborted goal during step '{current_step}': {recovery.get('reason', 'No reason provided')}"
     )
+
 
 
 # =========================
@@ -1101,7 +1134,7 @@ def run_agent(goal: str) -> None:
                 f"Step did not finish within MAX_ACTIONS_PER_STEP={MAX_ACTIONS_PER_STEP}: {current_step}"
             )
 
-    print(f"Returned output from agent: {returned_output}")
+    print(f"\n\n\n\n\nReturned output from agent: {returned_output}")
     print(
         f"\n🏁 GOAL FINISHED: Agent execution completed and used up:{tokens_used}/{TOKENS_PER_GOAL} tokens for this goal."
     )
@@ -1111,13 +1144,14 @@ def run_agent(goal: str) -> None:
     print(safe_json(agent_state), "\n\n\n\nPROGRAM STATE:", safe_json(program_state))
 
 
+
 # =========================
 # RUN
 # =========================
 if __name__ == "__main__":
     try:
         run_agent(
-            "cd into the test directory, and then cat the file named secret.txt")
+            "Go into the test folder, and then sort the files based on their types.")
     finally:
         try:
             client.close()
