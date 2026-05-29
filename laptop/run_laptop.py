@@ -47,14 +47,23 @@ MEMORY_VALS: Dict[str, Any] = {}
 # ENV LOADERS
 # =========================
 def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path' to avoid shadowing built-in abs()
-    path = os.path.join(abs_path, "exp/tool_import.txt")
+    path = os.path.join(abs_path, "exp/td.txt")
     try:
         with open(path, "r", encoding="utf-8") as f:
             a = f.read()
             # Removed redundant f.close() as 'with' handles it automatically
-        to_import = a.split()
+        to_import = []
+        data_lines = a.splitlines()
+        for line in data_lines:
+            a = line.split(",")
+            to_process = a[2]
+            to_process = to_process.split(" - ")
+            to_process = to_process[1].split(":")
+            to_import.append(to_process[0])
         tools = {}
         for imp in to_import:
+            if imp == "return":
+                imp = "return_value"
             print(f"tools.{imp}")
             tools[imp] = import_module(f"{NAME}.tools.{imp}")
             tools[imp] = getattr(tools[imp], imp)
@@ -636,15 +645,6 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     local_state = dict(state)
     local_state["last_action"] = action
-    if action.startswith("askuser:"):
-        output = input(action[len("askuser:") :].strip())
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
     if action.startswith("return:"):
         output = action[len("return:") :].strip()
         local_state["last_tool_output"] = output
