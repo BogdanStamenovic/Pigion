@@ -346,7 +346,7 @@ def _apply_truncation(output: str, policy: dict | None, tail_lines: int | None, 
     return res
 
 
-def shell(command, sudo: bool = False, sudo_password: str | None = None, timeout: float = 1.0, stream: bool = True, truncate: bool = False, truncate_policy: dict | None = None, tail_lines: int | None = None):
+def run_shell(command, sudo: bool = False, sudo_password: str | None = None, timeout: float = 1.0, stream: bool = True, truncate: bool = False, truncate_policy: dict | None = None, tail_lines: int | None = None):
     """Execute a shell `command` in a persistent pty-backed bash.
 
     If `sudo` is True and `sudo_password` is provided, the function will
@@ -573,3 +573,30 @@ def shell_reset():
             os.close(fd)
         except OSError:
             pass
+
+def shell(command, memory, local_state):
+    if "sudo" in command:
+        output = str(run_shell(command, sudo=True, stream=True, truncate=True))
+    else:
+        output = str(run_shell(command, stream=True, truncate=True))
+
+        # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
+    try:
+        pwd_out = run_shell("pwd")
+        if isinstance(pwd_out, str):
+                # take last non-empty line as CURRENT_WORKING_DIRECTORY
+            lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
+            if lines:
+                new_cwd = lines[-1]
+                local_state["CURRENT_WORKING_DIRECTORY"] = new_cwd
+    except Exception:
+            # If anything goes wrong, keep existing CURRENT_WORKING_DIRECTORY (or fallback to os.getcwd())
+        local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
+
+    local_state["last_tool_output"] = output
+    return {
+            "ok": True,
+            "output": output,
+            "memory": memory,
+            "state": local_state,
+        }
