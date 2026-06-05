@@ -1,27 +1,24 @@
-# Pigeon
+# Pigion
 
-Pigeon je lokalni autonomni agent framework zamišljen kao dedicated execution wrapper za mašinu koja je namenjena isključivo njemu. Trenutni fokus projekta je Watchdog, primarni agent koji planira, izvršava, evaluira i oporavlja se od grešaka unutar striktno ograničenog kontrolnog loop-a. Ostatak sistema je zamišljen hijerarhijski i odvojeno: Bossman, Cogmet, Cleaner i Mutormentor.
+Pigion je lokalni autonomni agent framework zamišljen kao dedicated execution wrapper za mašinu koja je namenjena isključivo njemu. Trenutni fokus projekta je Watchdog — primarni agent koji planira, izvršava, evaluira i oporavlja se od grešaka unutar striktno ograničenog kontrolnog loop-a. Ostatak sistema je zamišljen hijerarhijski i odvojeno: Bossman, Cogmet, Cleaner i Mutormentor.
 
 ## Projekt - struktura i novosti
 
-Ovaj README je ažuriran da opiše dodatne module i skripte koje su dodate u repozitorij:
+Ovaj README je ažuriran da opiše trenutnu strukturu repozitorija i ispravi reference na stvarne fajlove i foldere u projektu.
 
-- **`laptop.py`** — Watchdog agent konfigurisan za laptop/Windows okruženje (koristi `tools_windows`).
-- **`pi.py`** — isto što i `laptop.py` ali za Linux/Raspberry Pi okruženje (koristi `tools_linux`).
-- **`tools_linux/`** — `shell.py` (persistent PTY-backed bash, sanitizacija izlaza, podrška za sudo i `.env`), `search.py` (DDGS wrapper za pretragu i ekstrakciju stranica).
-- **`tools_windows/`** — `shell.py` (persistent PowerShell runner), `search.py` (DDGS wrapper).
+- **`laptop/run_laptop.py`** — Watchdog agent konfigurisan za laptop/Windows okruženje (koristi `laptop/tools/`).
+- **`pi/run_pi.py`** — Watchdog agent za Raspberry Pi / Linux okruženje (koristi `pi/tools/` i primer `pi_exp/`).
+- **`laptop/tools/`** i **`pi/tools/`** — platform-specifični tool wrapper-i: `shell.py`, `search.py`, `memadd.py`, `askuser.py`, `return_value.py`.
+- **`tools_linux/`** — postoji u repou, trenutno bez korisnog sadržaja (placeholder / može biti deo legacy strukture).
 - **`agent_test_makers/`** — skripte za generisanje test primera (npr. `file_sort_test.py`).
-- **`laptop_exp/` i `pi_exp/`** — primer direktorijumi za `td.txt`, `enving.txt` i `exp.jsonl` (experience store).
-- **`test/`** — primeri fajlova za sortiranje (html, ini, json, md, py, text, txt).
+- **`laptop/exp/`**, **`pi/exp/`** i **`pi_exp/`** — primeri i iskustva (`td.txt`, `enving.txt`, `exp.jsonl`).
 - **`requirements.txt`**, **`setup.sh`** i **`setup.ps1`** — pomoćni fajlovi za instalaciju i setup.
-- **`.env`** — opcionalni fajl za environment promenljive (npr. `API_KEY`, `ABS_PATH`, `SUDO_PASSWORD`).
+- **`.env`** — opciona datoteka za environment promenljive (npr. `API_KEY`, `ABS_PATH`, `SUDO_PASSWORD`).
 
-Krucijalne nadogradnje dodate u repo:
-- Persistentne shell implementacije (`tools_linux.shell`, `tools_windows.shell`) koje održavaju dugotrajan shell proces i vraćaju očišćen izlaz.
-- Bolja `sudo` podrška (može učitati lozinku iz environment varijable ili `.env`; pokušava subprocess run kada lozinka postoji radi čiste kontrole izlaza).
-- `ExpStore` — jednostavan lokalni experience store (`.jsonl`) sa sparse-vector vektorizacijom i cosine-similarity pretragom.
-- Primeri za laptop i Raspberry Pi (`laptop.py`, `pi.py`) sa default goal-ima i loaderima za `td.txt`/`enving.txt`.
-- `tools_*/*.search` — DDGS-based search/extract helper.
+Krucijalne nadogradnje i napomene (lokacije su ažurirane na stvarnu strukturu):
+- Persistentne shell implementacije nalaze se u `laptop/tools/shell.py` i `pi/tools/shell.py` i održavaju dugotrajan shell proces koji pokušava vratiti očišćen izlaz.
+- `sudo` podrška realizovana je unutar shell wrapper-a (pogledati `laptop/tools/shell.py` i `pi/tools/shell.py`).
+- `ExpStore` i experience handling se nalaze u skriptama i primerima u `laptop/exp/` i `pi/exp/`.
 
 U nastavku stoje detaljniji opisi Watchdog-a i planovi razvoja (sadržaj iz originalnog README je zadržan i dopunjen sa gornjim stvarima).
 
