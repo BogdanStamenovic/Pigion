@@ -466,6 +466,7 @@ def decide_next_action(
     state: Dict[str, Any],
     program_state: Dict[str, Any],
     action_history: List[Dict[str, Any]],
+    last_eval: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if program_state.get("force_next_action") != None:
         helper = program_state["force_next_action"]
@@ -485,11 +486,19 @@ def decide_next_action(
         state=state,
         action_history=action_history,
     )
+    # Provide last evaluation context when available
+    last_evaluation = ""
+    if last_eval:
+        last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
+NOTE: If a LAST EVALUATION exists, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
+"""
 
     prompt = f"""
 Choose the SINGLE next executable action for the CURRENT STEP.
 
-CURRENT STEP:
+{last_evaluation}
+
+CURRENT STEP:s
 {current_step}
 
 Return ONLY:
@@ -506,6 +515,7 @@ RULES:
 - If blocked, return status "fail" and next_action "".
 - If continuing, return exactly one valid tool action in next_action.
 """
+    print(prompt)
     result = call_llm(prompt, system)
 
     result.setdefault("status", "fail")
@@ -899,7 +909,8 @@ def run_agent(goal: str) -> None:
         action_history: List[Dict[str, Any]] = []
         recovery_attempts = 0
         step_done = False
-
+        # Track the last evaluation result so the decider can consider it
+        last_eval: Optional[Dict[str, Any]] = None
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
@@ -912,7 +923,6 @@ def run_agent(goal: str) -> None:
                 raise RuntimeError(
                     f"Token limit exceeded for goal: {tokens_used}/{TOKENS_PER_GOAL} tokens used"
                 )
-
             decision = decide_next_action(
                 goal=goal,
                 plan=steps,
@@ -923,6 +933,7 @@ def run_agent(goal: str) -> None:
                 state=agent_state,
                 action_history=action_history,
                 program_state=program_state,
+                last_eval=last_eval,
             )
 
             status = str(decision.get("status", "")).strip().lower()
@@ -1011,6 +1022,9 @@ def run_agent(goal: str) -> None:
                 tool_output=tool_output,
             )
 
+            # Make the last evaluator output available to the decider on the next round
+            last_eval = evaluation
+
             eval_status = str(evaluation.get("status", "")).strip().lower()
             eval_reason = str(evaluation.get("reason", "No reason provided"))
 
@@ -1087,7 +1101,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "Go into the test folder, and then sort the files based on their types.")
+            "In the dekstop folder make a file caled stevicpicka.txt and write 'Stevic Picka' in it. and then open it in notepad to the user.")
     finally:
         try:
             client.close()
