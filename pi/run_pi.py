@@ -47,14 +47,23 @@ MEMORY_VALS: Dict[str, Any] = {}
 # ENV LOADERS
 # =========================
 def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path' to avoid shadowing built-in abs()
-    path = os.path.join(abs_path, "exp/tool_import.txt")
+    path = os.path.join(abs_path, "exp/td.txt")
     try:
         with open(path, "r", encoding="utf-8") as f:
             a = f.read()
             # Removed redundant f.close() as 'with' handles it automatically
-        to_import = a.split()
+        to_import = []
+        data_lines = a.splitlines()
+        for line in data_lines:
+            a = line.split(",")
+            to_process = a[2]
+            to_process = to_process.split(" - ")
+            to_process = to_process[1].split(":")
+            to_import.append(to_process[0])
         tools = {}
         for imp in to_import:
+            if imp == "return":
+                imp = "return_value"
             print(f"tools.{imp}")
             tools[imp] = import_module(f"{NAME}.tools.{imp}")
             tools[imp] = getattr(tools[imp], imp)
@@ -652,15 +661,6 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
 
     local_state = dict(state)
     local_state["last_action"] = action
-    if action.startswith("askuser:"):
-        output = input(action[len("askuser:") :].strip())
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
     if action.startswith("return:"):
         output = action[len("return:") :].strip()
         local_state["last_tool_output"] = output
@@ -672,70 +672,10 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "memory": memory,
             "state": local_state,
         }
-
-    if action.startswith("search:"):
-        query = action[len("search:") :].strip()
-        output = str(TOOLS["search"](query))
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
-
-    if action.startswith("shell:"):
-        command = action[len("shell:") :].strip()
-        if "sudo" in command:
-            output = str(TOOLS["shell"](command))
-        else:
-            output = str(TOOLS["shell"](command))
-
-        # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
-        try:
-            pwd_out = TOOLS["shell"]("pwd")
-            if isinstance(pwd_out, str):
-                # take last non-empty line as CURRENT_WORKING_DIRECTORY
-                lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
-                if lines:
-                    new_cwd = lines[-1]
-                    local_state["CURRENT_WORKING_DIRECTORY"] = new_cwd
-        except Exception:
-            # If anything goes wrong, keep existing CURRENT_WORKING_DIRECTORY (or fallback to os.getcwd())
-            local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
-
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
-
-    if action.startswith("memadd:"):
-        value = action[len("memadd:") :].strip()
-        existing_lines = [line for line in memory.splitlines() if line.strip()]
-        if existing_lines and existing_lines[-1] == value:
-            new_memory = memory
-            output = "MEMORY_ALREADY_ENDED_WITH_SAME_VALUE"
-        elif "=" in value:
-            global MEMORY_VALS
-            key, val = value.split("=", 1)
-            MEMORY_VALS[key] = val
-            new_memory = memory
-            output = f"MEMORY_KEY_UPDATED: {key} to {val}"
-        else:
-            new_memory = (memory + "\n" + value).strip() if memory else value
-            output = "MEMORY_UPDATED"
-
-        local_state["last_tool_output"] = output
-        return {
-            "ok": True,
-            "output": output,
-            "memory": new_memory,
-            "state": local_state,
-        }
-
+    parts = action.split(":", 1)
+    if len(parts) == 2:
+        prefix, suffix = parts
+        return TOOLS[prefix](suffix, memory, local_state)
     local_state["last_tool_output"] = "UNKNOWN_TOOL"
     return {
         "ok": False,
@@ -1168,7 +1108,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent(
-            "Go into the test folder, and then sort the files based on their types.")
+            "use askuser.")
     finally:
         try:
             client.close()

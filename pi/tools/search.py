@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import urlparse
-import time
 
 from ddgs import DDGS
 
@@ -27,7 +27,7 @@ def _is_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def search(
+def run_search(
     payload: str | dict[str, Any] | None = None,
     *,
     max_results: int = 7,
@@ -74,7 +74,7 @@ def search(
             region=region,
             safesearch="moderate",
             max_results=max_results,
-            backend="duckduckgo",
+            backend="bing",
         )
 
         normalized = []
@@ -88,7 +88,7 @@ def search(
                 }
             )
 
-        # Ako nema rezultata, pokušaj test pitanje da detektuje rate limit
+        # If no results, try a known test query to detect rate-limiting
         if len(normalized) == 0:
             test_query = "whats the capital of france"
             try:
@@ -131,3 +131,36 @@ def search(
             "input": query,
             "error": f"{type(e).__name__}: {e}",
         }
+def search(command, memory, local_state):
+    local_state=dict(local_state)  # Make a copy to avoid mutating the original
+    output = run_search(command)
+    if output["ok"] == False and output["error"] == "DDGSException: No results found.":
+        print("DuckDuckGo search failed with 'No results found'. This may be due to rate-limiting. Retrying after 5 seconds...")
+        for x in range (5):
+            print(f"Retry attempt {x+1}/5...")
+            time.sleep(5)
+            output = run_search(command)
+            if output["ok"] == True:
+                local_state["last_tool_output"] = output
+                print(output)
+                return {
+                        "ok": True,
+                        "output": output,
+                        "memory": memory,
+                        "state": local_state,
+                }
+        return {
+            "ok": False,
+            "error": "DuckDuckGo search failed after multiple attempts due to rate-limiting.",
+            "memory": memory,
+            "state": local_state,
+        }
+    output = str(output)
+    local_state["last_tool_output"] = output
+    print(output)
+    return {
+            "ok": True,
+            "output": output,
+            "memory": memory,
+            "state": local_state,
+    }
