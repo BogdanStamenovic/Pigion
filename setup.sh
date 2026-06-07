@@ -122,12 +122,12 @@ fi
 
 # Set env file paths based on device type
 if [[ "$DEVICE_TYPE" == "pi" ]]; then
-  ENV_PATH="pi_exp/enving.txt"
-  OTHER_ENV_PATH="laptop_exp/enving.txt"
+  ENV_PATH="pi/exp/enving.txt"
+  OTHER_ENV_PATH="laptop/exp/enving.txt"
   OTHER_LABEL="laptop"
 else
-  ENV_PATH="laptop_exp/enving.txt"
-  OTHER_ENV_PATH="pi_exp/enving.txt"
+  ENV_PATH="laptop/exp/enving.txt"
+  OTHER_ENV_PATH="pi/exp/enving.txt"
   OTHER_LABEL="pi"
 fi
 

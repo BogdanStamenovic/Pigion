@@ -1,97 +1,345 @@
 # Pigion
 
-Pigion je lokalni autonomni agent framework zamišljen kao dedicated execution wrapper za mašinu koja je namenjena isključivo njemu. Trenutni fokus projekta je Watchdog — primarni agent koji planira, izvršava, evaluira i oporavlja se od grešaka unutar striktno ograničenog kontrolnog loop-a. Ostatak sistema je zamišljen hijerarhijski i odvojeno: Bossman, Cogmet, Cleaner i Mutormentor.
+Pigion is a local autonomous-agent framework built around a bounded execution loop called Watchdog. The repository currently contains two platform-specific Watchdog runners:
 
-## Projekt - struktura i novosti
+- `laptop/` for a Windows laptop environment using persistent PowerShell.
+- `pi/` for a Raspberry Pi or Linux environment using persistent Bash through a PTY.
 
-Ovaj README je ažuriran da opiše trenutnu strukturu repozitorija i ispravi reference na stvarne fajlove i foldere u projektu.
+Both runners share the same core architecture: create a high-level plan, execute one step at a time, call tools through text actions, evaluate each action, recover from failures when possible, and store useful failure/recovery patterns in a local JSONL experience database.
 
-- **`laptop/run_laptop.py`** — Watchdog agent konfigurisan za laptop/Windows okruženje (koristi `laptop/tools/`).
-- **`pi/run_pi.py`** — Watchdog agent za Raspberry Pi / Linux okruženje (koristi `pi/tools/` i primer `pi_exp/`).
-- **`laptop/tools/`** i **`pi/tools/`** — platform-specifični tool wrapper-i: `shell.py`, `search.py`, `memadd.py`, `askuser.py`, `return_value.py`.
-- **`tools_linux/`** — postoji u repou, trenutno bez korisnog sadržaja (placeholder / može biti deo legacy strukture).
-- **`agent_test_makers/`** — skripte za generisanje test primera (npr. `file_sort_test.py`).
-- **`laptop/exp/`**, **`pi/exp/`** i **`pi_exp/`** — primeri i iskustva (`td.txt`, `enving.txt`, `exp.jsonl`).
-- **`requirements.txt`**, **`setup.sh`** i **`setup.ps1`** — pomoćni fajlovi za instalaciju i setup.
-- **`.env`** — opciona datoteka za environment promenljive (npr. `API_KEY`, `ABS_PATH`, `SUDO_PASSWORD`).
+The codebase is still experimental. Several modules are duplicated between `laptop` and `pi`. This README documents the project exactly as it exists now.
 
-Krucijalne nadogradnje i napomene (lokacije su ažurirane na stvarnu strukturu):
-- Persistentne shell implementacije nalaze se u `laptop/tools/shell.py` i `pi/tools/shell.py` i održavaju dugotrajan shell proces koji pokušava vratiti očišćen izlaz.
-- `sudo` podrška realizovana je unutar shell wrapper-a (pogledati `laptop/tools/shell.py` i `pi/tools/shell.py`).
-- `ExpStore` i experience handling se nalaze u skriptama i primerima u `laptop/exp/` i `pi/exp/`.
+## Repository Layout
 
-U nastavku stoje detaljniji opisi Watchdog-a i planovi razvoja (sadržaj iz originalnog README je zadržan i dopunjen sa gornjim stvarima).
+```text
+Pigion/
+  README.md
+  maker.py
+  requirements.txt
+  setup.ps1
+  setup.sh
+  file_sort_test copy.py
+  agent_test_makers/
+    file_sort_test.py
+  platforms/
+    laptop/
+      tools/
+        askuser.py
+        memadd.py
+        return_value.py
+        search.py
+        shell.py
+    pi/
+      tools/
+        askuser.py
+        memadd.py
+        return_value.py
+        search.py
+        shell.py
+  laptop/
+    run_laptop.py
+    exp/
+      td.txt
+      enving.txt
+    tools/
+      askuser.py
+      memadd.py
+      return_value.py
+      search.py
+      shell.py
+  pi/
+    run_pi.py
+    exp/
+      td.txt
+      tool_import.txt
+      enving.txt
+    tools/
+      askuser.py
+      memadd.py
+      return_value.py
+      search.py
+      shell.py
+```
 
-## Trenutno stanje projekta
+## Requirements
 
-Trenutno je implementiran Watchdog, odnosno glavni agent loop. Njegova svrha je da uzme jedan goal, razbije ga na ograničen broj koraka, izvršava samo trenutni korak, koristi alate preko tekstualnih akcija i po potrebi pokušava recovery. Pored toga postoji experience store koji čuva prethodne failure obrasce i njihove uspešne alternative kako bi recovery imao dodatni kontekst. Ceo flow je bounded i ne može da ostane zaglavljen beskonačno, jer svaki korak i svaki nivo retry-a imaju hardkodovane limite.
+Runtime dependencies are listed in `requirements.txt`:
 
-## Arhitektura
+- `google-genai`: Gemini API client used by the Watchdog runners.
+- `python-dotenv`: loads `.env` configuration.
+- `ddgs`: search and URL extraction tool.
+- `protobuf`: dependency used by the Google client stack.
 
-Trenutna i planirana arhitektura je hijerarhijska i modularna:
+Python 3 is required. The Windows setup script expects `python`; the Unix setup script expects `python3`.
 
-- Bossman: spoljašnji failsafe i sistemski rollback sloj za katastrofalne greške izazvane agentom.
-- Cogmet: meta layer za health i evaluaciju na nivou završenih taskova.
-- Cleaner: održavanje i uklanjanje redundansi iz experience baze.
-- Mutormentor: eksperimentalni sloj za mutacije promptova i njihovo testiranje.
-- Watchdog: glavni execution agent.
+## Installation
 
-Watchdog je jedini deo koji je trenutno direktno implementiran u dostavljenom kodu. Ostali slojevi su planirani, ali još nisu integrisani u runtime prikazan ovde.
+Windows PowerShell:
 
-## Kako Watchdog radi trenutno
+```powershell
+.\setup.ps1
+```
 
-### 1. Konfiguracija i budžeti
+Linux or Raspberry Pi:
 
-Watchdog koristi niz runtime parametara kroz environment promenljive. Najbitnije su:
+```bash
+chmod +x setup.sh
+./setup.sh
+```
 
-- model za LLM pozive
-- temperatura
-- maksimalan broj izlaznih tokena po pozivu
-- maksimalan broj akcija po koraku
-- maksimalan broj LLM retry pokušaja
-- maksimalan broj recovery pokušaja po koraku
-- ukupan token budget po goal-u
-- putanja do experience baze
-- broj sličnih failure primera koji se vraćaju recovery fazi
+Both scripts can create a `.venv`, install `requirements.txt`, write `.env` values, and write device environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
 
-Token accounting je trenutno aproksimacija zasnovana na dužini prompta, a ne stvarni usage iz API odgovora. Experience baza se čuva kao JSONL fajl.
+## Environment Variables
 
-### 2. Učitavanje okruženja i dokumentacije alata
+The runners use these environment variables:
 
-Na startu se pokušava učitavanje dva tekstualna fajla:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `API_KEY` | none | Google GenAI API key. |
+| `ABS_PATH` | required | Absolute path to the project root. The runner appends `pi` or `laptop`. |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model used for planning, decisions, evaluation, and recovery. |
+| `LLM_TEMPERATURE` | `0.3` | Generation temperature. |
+| `MAX_OUTPUT_TOKENS` | `700` | Max tokens requested per model call. |
+| `MAX_ACTIONS_PER_STEP` | `12` | Max tool/action rounds per plan step. |
+| `MAX_LLM_RETRIES` | `6` | Max model-call retries. |
+| `MAX_RECOVERY_ATTEMPTS` | `6` | Max recovery attempts per step. |
+| `TOKENS_PER_GOAL` | `100000` | Approximate token budget for one goal. |
+| `EXP_DB_PATH` | `<ABS_PATH>/<device>/exp/exp.jsonl` | JSONL experience database path. |
+| `SIMILAR_FAILURES_TOP_K` | `5` | Number of similar past failures passed into recovery. |
+| `MAX_SHELL_OUTPUT` | `200000` | Linux shell output limit before truncation. |
+| `SHELL_TAIL_LINES` | `50` | Linux shell fallback tail length. |
+| `SHELL_TRUNCATE_MIN_LINES` | `20` | Linux shell minimum line count before truncation. |
+| `SUDO_PASSWORD` | none | Optional sudo password for Linux shell commands. |
+| `TEST_SUDO_PASSWORD` | none | Alternate optional sudo password name. |
 
-- `td.txt` za opis dostupnih alata
-- `enving.txt` za opis okruženja
+Example `.env`:
 
-Ti tekstovi se kasnije direktno ubacuju u system prompt, tako da Watchdog u svakom LLM pozivu dobija isto objašnjenje okruženja i tool surface-a. Ako fajlovi ne postoje, koriste se fallback poruke.
+```env
+API_KEY="your-google-genai-key"
+ABS_PATH="C:\Users\helper\Desktop\Pigion"
+GEMINI_MODEL="gemini-2.5-flash-lite"
+```
 
-### 3. JSON disciplina i ekstrakcija izlaza
+For Linux/Pi:
 
-Watchdog očekuje da model uvek vraća validan JSON objekat. Zbog toga:
+```env
+API_KEY="your-google-genai-key"
+ABS_PATH="/home/pi/Pigion"
+SUDO_PASSWORD=""
+```
 
-- gradi prompt koji više puta insistira na čistom JSON izlazu
-- pokušava prvo direktan `json.loads`
-- ako to ne uspe, pokušava da izdvoji prvi validan JSON objekat iz sirovog teksta
+## Running Watchdog
 
-Ovo je osnovni mehanizam koji drži agent determinističnijim i kompatibilnim sa ostatkom kontrolnog loop-a.
+Laptop runner:
 
-### 4. Experience store
+```powershell
+python laptop\run_laptop.py
+```
 
-Experience store služi za čuvanje prethodnih failure događaja i uspešnih alternativa. Svaki entry sadrži:
+Pi/Linux runner:
 
-- `name`: generički tip greške
-- `reason`: razlog ili opis greške
-- `alternative`: akciju koja je kasnije pomogla
-- `step`: korak u kome se greška desila
-- `failed_action`: akciju koja je failovala
-- `successful_action`: akciju koja je kasnije bila uspešna
-- `created_at`: timestamp
+```bash
+python3 pi/run_pi.py
+```
 
-Prilikom učitavanja baze svi entry-ji se tokenizuju i pretvaraju u sparse vektore. Sličnost se računa cosine similarity pristupom nad kombinacijom `name`, `reason`, `step` i `failed_action`. Rezultat recovery fazi vraća top K najsličnijih prethodnih failova.
+Each runner currently has a hard-coded demo goal in its `if __name__ == "__main__"` block. To run a custom goal, import `run_agent`:
 
-### 5. Klasifikacija failure događaja
+```python
+from laptop.run_laptop import run_agent
 
-Kada dođe do faila, Watchdog pokušava da ga svede na generičko ime greške pomoću determinističke funkcije `infer_failure_name`. Trenutno podržani tipovi uključuju:
+run_agent("Sort the files in the test folder into subfolders by type.")
+```
+
+or:
+
+```python
+from pi.run_pi import run_agent
+
+run_agent("Inspect the current directory and summarize what files exist.")
+```
+
+## Creating New Instances
+
+Use `maker.py` to generate another Watchdog instance package. The runner logic is copied from the shared Watchdog template and the generated runner gets its own `NAME` value, package folder, tools, and `exp` files.
+
+Platform-specific tool templates live in the central `platforms/` folder:
+
+```text
+platforms/
+  laptop/
+    tools/
+  pi/
+    tools/
+```
+
+To add another platform, create `platforms/<platform-name>/tools` and put compatible tool modules inside it. `maker.py` discovers platform names from that folder.
+
+Interactive mode:
+
+```powershell
+python maker.py
+```
+
+Non-interactive example:
+
+```powershell
+python maker.py lab_agent --platform laptop --tools shell,memadd,search,return,askuser
+```
+
+Pi/Linux-style shell tools:
+
+```bash
+python3 maker.py field_agent --platform pi --tools all
+```
+
+The maker currently discovers these built-in tool names from the selected `platforms/<platform>/tools` folder:
+
+- `shell`
+- `memadd`
+- `search`
+- `return`
+- `askuser`
+
+Generated layout:
+
+```text
+lab_agent/
+  __init__.py
+  run_lab_agent.py
+  exp/
+    td.txt
+    enving.txt
+    tool_import.txt
+  tools/
+    __init__.py
+    ...
+```
+
+Use `--force` to replace an existing generated instance directory with the same name.
+
+## Watchdog Execution Flow
+
+Watchdog follows this loop:
+
+1. Load `.env`, tool documentation, environment documentation, and dynamic tool modules.
+2. Initialize the Gemini client.
+3. Load the local experience database.
+4. Ask the model for a high-level plan with 3 to 7 steps.
+5. Work through the plan one step at a time.
+6. Ask the model for exactly one next action.
+7. Execute that action through a tool module.
+8. Ask the model to evaluate the last action.
+9. If evaluation fails, classify the failure and run recovery.
+10. If recovery later succeeds, write a new experience entry.
+11. Stop when all steps finish or a hard limit is reached.
+
+The agent is intentionally bounded. It does not run forever: every goal has action, retry, recovery, and approximate token limits.
+
+## Tool Action Format
+
+The model is expected to choose actions as plain strings with a prefix:
+
+| Prefix | Meaning |
+| --- | --- |
+| `shell:COMMAND` | Execute a shell command. |
+| `search:QUERY_OR_URL` | Search the web or extract text from a URL. |
+| `memadd:TEXT` | Add text to temporary memory. |
+| `memadd:KEY=VALUE` | Store a key/value in `MEMORYVALS`. |
+| `askuser:QUESTION` | Ask the user for input. |
+| `return:TEXT` | Append text to final returned output. |
+
+The runners dynamically import tools by reading `exp/td.txt`. The parser extracts tool names from each line's `Command - <tool>:...` section. `return` is mapped to the module name `return_value`.
+
+## Main Runner Modules
+
+### `laptop/run_laptop.py`
+
+Windows Watchdog runner. It sets `NAME = "laptop"` and imports tools from `laptop.tools`.
+
+Responsibilities:
+
+- Loads environment values with `python-dotenv`.
+- Builds `ABS_PATH` as `os.path.join(os.getenv("ABS_PATH"), "laptop")`.
+- Reads `laptop/exp/td.txt` and `laptop/exp/enving.txt`.
+- Dynamically imports tool modules.
+- Creates and owns the Gemini client.
+- Builds strict JSON prompts for planning, action choice, action evaluation, and recovery.
+- Tracks temporary memory, state, action history, completed steps, pending failures, and token estimates.
+- Stores and retrieves failure/recovery examples through `ExpStore`.
+- Runs a hard-bounded action loop for each plan step.
+
+Notable current details:
+
+- The script prints raw model output for debugging.
+- Token accounting is approximate: `len(prompt) // 4 + MAX_OUTPUT_TOKENS`.
+- The main block contains a hard-coded Windows demo task that creates and opens a text file.
+- The decision prompt contains `CURRENT STEP:s`, which looks like a typo but is harmless text in the prompt.
+
+### `pi/run_pi.py`
+
+Linux/Pi Watchdog runner. It sets `NAME = "pi"` and imports tools from `pi.tools`.
+
+It has the same core responsibilities as `laptop/run_laptop.py`, with these differences:
+
+- Reads from `pi/exp/td.txt` and `pi/exp/enving.txt`.
+- Imports tools from `pi.tools`.
+- Includes `MEMORY VALUES` in the system prompt when `MEMORY_VALS` is populated.
+- The main block contains a hard-coded demo goal: `use askuser.`
+- The shell tool is Linux-specific and supports sudo handling.
+
+## Shared Runner Functions
+
+Both runners define the same major functions and classes:
+
+| Name | Purpose |
+| --- | --- |
+| `tool_import()` | Reads `exp/td.txt`, extracts tool prefixes, imports matching modules, and returns callable tools. |
+| `load_tool_docs()` | Loads tool documentation text for prompt context. |
+| `load_env()` | Loads environment description text for prompt context. |
+| `count_tokens()` | Estimates tokens by character length. |
+| `safe_json()` | Serializes objects as formatted JSON for prompts. |
+| `extract_json()` | Parses model output as JSON, with fallback extraction from surrounding text. |
+| `_tokenize()` | Tokenizes text for sparse similarity. |
+| `_vectorize()` | Builds sparse token-count vectors. |
+| `_cosine_sparse()` | Computes cosine similarity between sparse vectors. |
+| `ExpStore` | Loads, appends, and searches JSONL experience entries. |
+| `infer_failure_name()` | Maps errors into stable failure categories. |
+| `init_client()` | Creates a Google GenAI client. |
+| `trim_history()` | Keeps only recent action history for prompts. |
+| `build_system_prompt()` | Creates the main prompt context and execution rules. |
+| `call_llm()` | Calls Gemini with retry handling and JSON parsing. |
+| `create_plan()` | Requests a 3 to 7 step plan. |
+| `decide_next_action()` | Requests exactly one next action for the current step. |
+| `evaluate_action()` | Evaluates the last action against the current step. |
+| `recover_step()` | Asks the model how to recover from a failure. |
+| `run_tool()` | Dispatches `return:` internally or calls a dynamically imported tool. |
+| `build_pending_failure()` | Creates a structured failure record. |
+| `finalize_experience_if_needed()` | Writes a useful recovery to the experience DB after success. |
+| `recover_from_failure()` | Combines failure classification, similar failure lookup, and recovery prompting. |
+| `apply_recovery_decision()` | Applies retry, step replacement, skip, or abort decisions. |
+| `run_agent()` | Main execution loop. |
+
+## Experience Store
+
+`ExpStore` stores failure/recovery examples as JSONL entries. Each entry contains:
+
+```json
+{
+  "name": "shell_command_failed",
+  "reason": "why it failed",
+  "alternative": "shell:alternative command",
+  "step": "the current plan step",
+  "failed_action": "the action that failed",
+  "successful_action": "the later action that worked",
+  "created_at": 1710000000.0
+}
+```
+
+Similarity is local and simple: text from `name`, `reason`, `step`, and `failed_action` is tokenized into sparse vectors, then compared with cosine similarity. The recovery prompt receives the top matching entries.
+
+## Failure Categories
+
+`infer_failure_name()` can classify failures as:
 
 - `permission_denied`
 - `repository_not_found`
@@ -106,271 +354,268 @@ Kada dođe do faila, Watchdog pokušava da ga svede na generičko ime greške po
 - `memory_write_failed`
 - `generic_step_failure`
 
-Ovaj layer je važan jer experience retrieval ne radi samo po slobodnom tekstu, nego i po stabilnom failure identitetu.
+## Tool Modules
 
-### 6. Konstrukcija system prompt-a
+The central template copies live under `platforms/laptop/tools` and `platforms/pi/tools`. The existing `laptop/tools` and `pi/tools` folders are the tools used by those two checked-in instances.
 
-Glavna funkcija za prompt building ubacuje u system prompt sledeće:
+### `platforms/laptop/tools/shell.py` and `laptop/tools/shell.py`
 
-- environment opis
-- tool docs
-- global goal
-- plan framework
-- indeks trenutnog koraka
-- tekst trenutnog koraka
-- listu završenih koraka
-- internu memory vrednost
-- runtime state
-- skraćenu istoriju poslednjih akcija
-- informaciju o procenjenoj token potrošnji
-- niz striktnih execution pravila
+Persistent PowerShell wrapper for Windows.
 
-Najvažnija pravila su:
+Key parts:
 
-- radi samo na trenutnom koraku
-- nema subplanova
-- nema preskakanja unapred
-- jedna akcija po odluci
-- status može biti `ongoing`, `done` ili `fail`
-- izlaz mora biti validan JSON
+- `_start_persistent_powershell()` starts `powershell -NoLogo -NoProfile -NoExit -Command -`.
+- It initializes console input/output encoding to UTF-8.
+- `run_shell(command)` base64-encodes the command, decodes it inside PowerShell, runs it with `Invoke-Expression`, and waits for a unique completion marker.
+- `shell(command, memory, local_state)` executes a command, updates `CURRENT_WORKING_DIRECTORY` by running `pwd`, stores `last_tool_output`, and returns the standard tool result dict.
+- `shell_reset()` exits and terminates the persistent PowerShell process.
 
-To znači da je Watchdog trenutno vrlo prompt-driven i da dosta discipline dobija iz velikog system prompt-a, a ne iz mnogo spoljne logike.
-
-### 7. LLM pozivi
-
-`call_llm` je jedino mesto koje direktno zove model. Tok rada je sledeći:
-
-1. spaja system prompt i task-specific prompt
-2. dodaje dodatni disclaimer koji ponavlja da izlaz mora biti JSON
-3. procenjuje dodatnu token potrošnju
-4. pokušava poziv do `MAX_LLM_RETRIES` puta
-5. loguje raw model output
-6. parsira rezultat u JSON
-
-Ako svi pokušaji propadnu, baca runtime grešku.
-
-### 8. Planiranje
-
-Na početku svakog goal-a Watchdog prvo traži od modela plan. Plan mora da bude:
-
-- između 3 i 7 koraka
-- high-level
-- bez tool call-ova
-- bez subplanova
-
-Ako plan nije validna lista, izvršavanje se prekida. Plan je samo okvir; kasnije se i dalje radi strogo korak po korak.
-
-### 9. Biranje sledeće akcije
-
-Za svaki trenutni korak Watchdog traži od modela tačno jednu sledeću izvršivu akciju. Model vraća:
-
-- `status`
-- `reason`
-- `next_action`
-
-Akcija je tekstualna komanda tipa:
-
-- `shell:...`
-- `search:...`
-- `memadd:...`
-- `return:...`
-
-Postoji i mehanizam `force_next_action` koji recovery faza može da upiše u state. Kada je on postavljen, sledeća akcija se ne bira preko modela već se direktno izvršava.
-
-### 10. Evaluacija poslednje akcije
-
-Posle svake izvršene akcije, Watchdog ponovo zove model da proceni samo poslednju akciju u kontekstu trenutnog koraka. Evaluacija vraća:
-
-- `ongoing`
-- `done`
-- `fail`
-
-Ovo je druga grana LLM logike pored biranja sledeće akcije. Trenutno postoji odvojena evaluaciona faza, pa Watchdog radi odluku, zatim tool execution, zatim evaluaciju tog output-a.
-
-### 11. Recovery faza
-
-Kada odluka ili evaluacija označe fail, aktivira se recovery. Recovery prompt dobija:
-
-- trenutni korak
-- opis greške
-- listu sličnih prethodnih failure primera iz experience store-a
-
-Model tada bira jedan od recovery modova:
-
-- `retry`
-- `replace_step`
-- `skip_step`
-- `abort_goal`
-
-To recovery logici daje mogućnost da:
-
-- proba novi konkretan sledeći potez
-- promeni formulaciju koraka
-- preskoči korak ako nije bitan ili je praktično završen
-- potpuno prekine goal ako dalji rad nema smisla ili nije bezbedan
-
-Broj recovery pokušaja je takođe bounded.
-
-### 12. Izvršavanje alata
-
-Watchdog trenutno podržava četiri tipa akcija:
-
-#### `return:`
-Dodaje tekst u završni `returned_output` i ažurira state.
-
-#### `search:`
-Poziva `search(query)` i rezultat čuva kao `last_tool_output`.
-
-#### `shell:`
-Poziva `shell(command)` i rezultat čuva kao `last_tool_output`. Ovo je najmoćniji alat, jer agentu daje direktan shell surface.
-
-Dodata je podrška za `sudo` u `tools_linux/shell.py`.
-
-Funkcija automatski pokušava da preuzme lozinku iz okruženja ili iz `.env` fajla u projektu. Podržana imena promenljivih su `SUDO_PASSWORD` i `TEST_SUDO_PASSWORD`.
-
-Primer upotrebe:
+Returned shape:
 
 ```python
-from tools_linux.shell import shell
-
-# simple command
-print(shell("echo hello"))
-
-# run with sudo; password will be loaded from environment or .env if available
-print(shell("whoami", sudo=True))
-
-# you can still pass password explicitly
-print(shell("whoami", sudo=True, sudo_password="YOUR_PASSWORD"))
+{
+    "ok": True,
+    "output": output,
+    "memory": memory,
+    "state": local_state,
+}
 ```
 
-Napomena: prosleđivanje lozinki u plaintext-u nije bezbedno — preporučuje se passwordless sudo ili bezbednije metode (npr. /etc/sudoers, vault).
+### `platforms/pi/tools/shell.py` and `pi/tools/shell.py`
 
-#### `memadd:`
-Dodaje vrednost u internu memory ako se ista vrednost već ne nalazi na kraju memory stringa. Održava i `memory_items` listu u state-u.
+Persistent Bash wrapper for Linux/Pi.
 
-Ako alat nije prepoznat, funkcija vraća `UNKNOWN_TOOL`.
+Key parts:
 
-### 13. Pending failure i upis iskustva
+- Starts an interactive `/bin/bash --noprofile --norc -i` through `pty.fork()`.
+- Disables prompt and command echoing.
+- Maintains shell process state across commands.
+- Supports sudo commands with either non-interactive `sudo -n` or password-backed `sudo -S`.
+- Loads `SUDO_PASSWORD` or `TEST_SUDO_PASSWORD` from environment or `.env`.
+- Sanitizes ANSI sequences, sudo prompts, echoed passwords, and common command noise.
+- Applies command-output truncation policies for verbose commands like `nmap`, `apt`, and `apt-get`.
+- Updates `CURRENT_WORKING_DIRECTORY` by running `pwd`.
+- `shell_reset()` kills and cleans up the persistent shell process.
 
-Kada se fail detektuje, Watchdog formira `pending_failure` objekat koji sadrži:
+Important: storing sudo passwords in `.env` is convenient but sensitive. Prefer passwordless sudo for narrowly scoped commands or another safer secret-management approach.
 
-- failure name
-- failure reason
-- step
-- failed action
-- timestamp
+### `platforms/*/tools/search.py`, `laptop/tools/search.py`, and `pi/tools/search.py`
 
-Kasnije, kada neka naredna akcija uspešno zatvori korak, `finalize_experience_if_needed` upisuje novi entry u experience store. Na taj način sistem pokušava da pamti koje alternative su bile korisne nakon određenog failure obrasca.
+Search and URL extraction tool using `ddgs`. The laptop and Pi versions are mirrored.
 
-### 14. Glavni execution loop
+Functions:
 
-Glavni loop radi ovako:
+- `_coerce_input(payload)` accepts a string, `{"search": "..."}`, or interactive input.
+- `_is_url(value)` detects `http` and `https` URLs.
+- `run_search(payload, max_results=7, max_chars=3000, region="us-en")` either extracts URL text or performs Bing-backed text search through `ddgs`.
+- `search(command, memory, local_state)` wraps `run_search()` in the standard tool result shape.
 
-1. resetuje runtime state i token brojač
-2. učitava experience store
-3. generiše plan
-4. ulazi u petlju po koracima
-5. za svaki korak pokreće akcione runde
-6. bira akciju
-7. izvršava alat
-8. evaluira ishod
-9. po potrebi radi recovery
-10. prelazi na sledeći korak kada je trenutni završen
+Modes:
 
-Ograničenja su hardkodovana:
+- Query mode returns normalized results with `rank`, `title`, `url`, and `snippet`.
+- URL mode returns extracted page text, truncated to `max_chars`.
 
-- 3 do 7 plan koraka
-- do 12 akcija po koraku
-- do 6 LLM retry pokušaja po pozivu
-- do 6 recovery pokušaja po koraku
-- token budget po goal-u
+If a search receives a specific DDGS no-results error, the wrapper retries up to 5 times with 5-second sleeps. It also prints search output to stdout before returning.
 
-Ako korak ne može da se završi u zadatim granicama, goal se prekida greškom. To znači da je izvršavanje bounded i ne postoji beskonačni loop unutar jednog goal-a.
+### `platforms/*/tools/memadd.py`, `laptop/tools/memadd.py`, and `pi/tools/memadd.py`
 
-## Trenutna svojstva Watchdog-a
+Temporary memory tool.
 
-Trenutni Watchdog ima sledeće osobine:
+Behavior:
 
-- planira pre izvršavanja
-- izvršava samo jedan korak u datom trenutku
-- bira jednu akciju po iteraciji
-- koristi poseban evaluacioni prolaz nakon svake akcije
-- ima recovery mehanizam koji koristi prethodna iskustva
-- ima tvrde limite na korake, akcije, retry i budžet
-- može da izvršava shell komande
-- čuva iskustvo u lokalnom JSONL store-u
-- koristi veliki system prompt kao glavni izvor discipline
+- Copies `local_state`.
+- If the last non-empty memory line already equals the command, it returns `MEMORY_ALREADY_ENDED_WITH_SAME_command`.
+- If the command contains `=`, it splits on the first `=` and writes `local_state["MEMORYVALS"][key] = val`.
+- Otherwise, it appends the command to the plain memory string.
+- Updates `last_tool_output`.
 
-## TODO
+The memory string is session-local and is not persisted to disk. `MEMORYVALS` lives in runtime state.
 
-### Watchdog
+### `platforms/laptop/tools/askuser.py` and `laptop/tools/askuser.py`
 
-- optimizovati token usage
-- smanjiti veličinu system prompt-a bez gubitka discipline
-- podeliti promptove po fazama umesto jednog univerzalnog system prompt-a
-- izbaciti nepotrebna grananja u execution flow-u
-- ukloniti ili spojiti dupliranu evaluacionu logiku gde je moguće
-- unaprediti klasifikaciju failure događaja i preciznost experience retrieval-a
-- dodati bolji mehanizam za fallback na externals kada task nije prirodno rešiv postojećim alatima
-- preći sa aproksimacije tokena na stvarni usage iz model response-a
-- dodatno smanjiti količinu state-a i history-ja koji se šalje modelu
+Interactive user-input tool for the laptop runner.
 
-### Bossman
+Behavior:
 
-- implementirati odvojeni failsafe sloj izvan Watchdog-a
-- uvesti snapshot i rollback mehanizam za katastrofalne sistemske greške izazvane agentom
-- napraviti verzionisanje kritičnih fajlova i konfiguracije
-- uvesti restore logiku za slučajeve kada agent ošteti sopstveni runtime ili core fajlove
-- definisati minimalan i robustan signal kojim Cogmet ili drugi sloj mogu da traže intervenciju Bossman-a
+- Calls `input(command)`.
+- Stores the answer in `last_tool_output`.
+- Returns the answer as `output`.
 
-### Cogmet
+### `platforms/pi/tools/askuser.py` and `pi/tools/askuser.py`
 
-- implementirati meta layer koji se poziva po završetku taska
-- računati health i kvalitet izvršavanja na nivou taska
-- pratiti metrike kao što su broj koraka, broj akcija, broj recovery pokušaja, status završetka i efikasnost
-- računati dugoročne proseke performansi za poređenje verzija promptova ili ponašanja sistema
-- odlučivati kada sistem pokazuje degradaciju koja zahteva signal prema Bossman-u ili Mutormentor-u
+Experimental raw-character input tool.
 
-### Cleaner
+Behavior:
 
-- uklanjati redundanse u experience bazi
-- spajati ili deduplikovati semantički iste entry-je
-- održavati experience store malim i korisnim
-- uklanjati loše ili zastarele pattern-e koji više ne donose vrednost recovery fazi
-- pripremati experience bazu za efikasniji retrieval
+- Prints `READING RAW CHARACTERS`.
+- Reads one character at a time from `sys.stdin`.
+- Prints each character representation.
 
-### Mutormentor
+Current limitation: it never returns a standard tool result and loops forever unless interrupted. It is not yet compatible with the runner's expected tool contract.
 
-- implementirati odvojeni mutation engine za promptove i eventualno konfiguracione parametre
-- generisati male, kontrolisane mutacije umesto potpunog rewrite-a promptova
-- testirati staru i novu verziju na kontrolisanom test setu
-- puštati novu verziju samo ako je bolja na testu
-- pratiti prosečne metrike nove verzije kroz duži period i na osnovu toga potvrđivati ili odbacivati mutaciju
-- revertovati promene ako nova verzija dugoročno pogorša statistike
-- nakon više uzastopnih reverta tretirati trenutnu verziju kao stabilnu osnovu
-- omogućiti ručni override od strane korisnika
+### `platforms/*/tools/return_value.py`, `laptop/tools/return_value.py`, and `pi/tools/return_value.py`
 
-## Napomena o hijerarhiji
+Simple helper module:
 
-Pigeon nije zamišljen kao jedan proces sa više internih submodula koji svi rade istovremeno. Ideja je hijerarhijska i odvojena:
+```python
+def return_value(aha):
+    return aha
+```
 
-- Watchdog izvršava taskove
-- Cogmet evaluira health i rezultate
-- Bossman reaguje samo kod katastrofalnih sistemskih posledica
-- Cleaner radi kada su odgovarajući execution slojevi ugašeni
-- Mutormentor radi kada ostali delovi sistema nisu aktivni
+The runners do not normally dispatch `return:` through this module. They handle `return:` directly inside `run_tool()` by appending text to the global `returned_output`.
 
-Time se zadržava jasan separation of concerns i izbegava se da recovery, maintenance i evolucija sistema budu pomešani sa samim izvršavanjem zadataka.
+## `exp` Files
 
-## Roadmap redosled
+### `laptop/exp/td.txt` and `pi/exp/td.txt`
 
-Trenutni plan razvoja ide ovim redosledom:
+Tool documentation injected into the system prompt. These files also indirectly control dynamic imports because `tool_import()` parses command prefixes from them.
 
-1. Cleaner
-2. optimizacija Watchdog-a
-3. Cogmet
-4. Bossman
-5. Mutate, odnosno Mutormentor, ako bude potreban u toj fazi
-6. automatske setup skripte za Raspberry Pi okruženje
+Current documented tools:
 
-Cilj završne faze je da Pigeon dobije automatizovan setup za Raspberry Pi, pošto je ceo sistem od početka zamišljen da bude namenjen dedicated RPi mašini i dugotrajnom lokalnom radu.
+- Shell
+- Memory
+- Search
+- Return
+- AskUser
+
+The parser assumes each line contains a comma-separated third field like:
+
+```text
+Command - shell:COMMAND
+```
+
+If this format changes, dynamic tool import may break.
+
+### `laptop/exp/enving.txt`
+
+Current laptop environment description:
+
+```text
+OS: Microsoft Windows 10 Pro
+TERMINAL: powershell
+```
+
+### `pi/exp/enving.txt`
+
+Current Pi/Linux environment description:
+
+```text
+OS: Kali GNU/Linux Rolling
+TERMINAL: zsh
+```
+
+### `pi/exp/tool_import.txt`
+
+Contains:
+
+```text
+shell search
+```
+
+Current runners do not read this file. Tool importing is based on `exp/td.txt`.
+
+### `exp/exp.jsonl`
+
+This file may be created at runtime by `ExpStore`. It is not present until the agent writes experience entries.
+
+## Test / Demo Scripts
+
+### `agent_test_makers/file_sort_test.py`
+
+Creates a `test/` folder with sample files:
+
+- `readme.txt`
+- `data.json`
+- `script.py`
+- `notes.md`
+- `config.ini`
+- `index.html`
+
+Then imports `run_agent` from `laptop.run_laptop` and asks the agent to sort those files into subfolders by type.
+
+Run on Windows:
+
+```powershell
+python agent_test_makers\file_sort_test.py
+```
+
+### `file_sort_test copy.py`
+
+Same concept as the laptop test script, but imports `run_agent` from `pi.run_pi`.
+
+Run on Linux/Pi:
+
+```bash
+python3 "file_sort_test copy.py"
+```
+
+## Setup Scripts
+
+### `setup.ps1`
+
+PowerShell setup script.
+
+It:
+
+- Verifies Python and pip.
+- Optionally creates `.venv`.
+- Installs `requirements.txt`.
+- Prompts for `API_KEY`.
+- Writes or updates `.env` with `API_KEY` and `ABS_PATH`.
+- Asks whether the current device is `pi` or `laptop`.
+- Detects current OS and terminal.
+- Prompts for the other device's OS and terminal.
+- Writes environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
+
+### `setup.sh`
+
+Unix setup script.
+
+It:
+
+- Verifies `python3` and pip.
+- Optionally creates `.venv`.
+- Installs `requirements.txt`.
+- Prompts for `API_KEY`.
+- Writes or updates `.env` with `API_KEY` and `ABS_PATH`.
+- Optionally stores `SUDO_PASSWORD`.
+- Sets `.env` permissions to `600`.
+- Asks whether the current device is `pi` or `laptop`.
+- Detects OS and terminal.
+- Prompts for the other device's OS and terminal.
+- Writes environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
+
+## Known Rough Edges
+
+- The existing code contains mojibake in debug strings and the old README had encoding damage.
+- `laptop/run_laptop.py` and `pi/run_pi.py` are mostly duplicated instead of sharing a common core.
+- Both runners require `ABS_PATH`; if it is missing, `os.path.join(os.getenv("ABS_PATH"), NAME)` will fail.
+- `tool_import()` error text mentions `tool_import.txt`, but the actual parser reads `exp/td.txt`.
+- `return_value.py` does not match the standard tool-call signature and is usually bypassed by `run_tool()`.
+- `pi/tools/askuser.py` does not return and can block forever.
+- Search requires network access and may be rate limited.
+- Shell tools are powerful and can modify the host system.
+
+## Roadmap Ideas
+
+Near-term cleanup:
+
+- Extract shared Watchdog logic into one reusable core module.
+- Keep only platform-specific shell behavior in platform packages.
+- Fix setup paths to write into `pi/exp` and `laptop/exp`.
+- Make all tools follow the same `(command, memory, local_state) -> dict` contract.
+- Replace hard-coded demo goals with CLI arguments.
+- Add tests for JSON extraction, experience retrieval, tool import parsing, and memory behavior.
+- Add safer shell command policies before using the agent on important machines.
+
+Longer-term architecture from the original project direction:
+
+- Watchdog: bounded execution agent.
+- Cleaner: maintenance for the experience database.
+- Cogmet: post-task evaluation and health scoring.
+- Bossman: external failsafe and rollback layer.
+- Mutormentor: controlled prompt/config mutation and evaluation.
+
+## Safety Notes
+
+Pigion can execute shell commands chosen by an LLM. Run it only in an environment where that is acceptable. Prefer a dedicated machine, VM, or container. Keep backups of important files. Avoid giving broad sudo access unless the machine is intentionally dedicated to this agent.

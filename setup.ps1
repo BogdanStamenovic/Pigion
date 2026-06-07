@@ -121,7 +121,7 @@ if ($deviceType -eq "pi" -or $deviceType -eq "laptop") {
 }
 
 # Populate current device's enving.txt automatically
-$currentEnvPath = if ($deviceType -eq "pi") { "pi_exp/enving.txt" } else { "laptop_exp/enving.txt" }
+$currentEnvPath = if ($deviceType -eq "pi") { "pi/exp/enving.txt" } else { "laptop/exp/enving.txt" }
 $currentEnvDir = Split-Path $currentEnvPath -Parent
 if (-not (Test-Path $currentEnvDir)) { New-Item -ItemType Directory -Path $currentEnvDir | Out-Null }
 Write-TextUtf8NoBom $currentEnvPath "OS: $deviceOs`nTERMINAL: $deviceTerminal"
@@ -129,7 +129,7 @@ Write-Host "Populated $currentEnvPath with current device specs."
 
 # Ask for other device's enving.txt fields
 $otherLabel = if ($deviceType -eq "pi") { "laptop" } else { "pi" }
-$otherEnvPath = if ($deviceType -eq "pi") { "laptop_exp/enving.txt" } else { "pi_exp/enving.txt" }
+$otherEnvPath = if ($deviceType -eq "pi") { "laptop/exp/enving.txt" } else { "pi/exp/enving.txt" }
 
 $otherOs = Read-Host "Enter $otherLabel OS (e.g. Windows 10):"
 $otherTerminal = Read-Host "Enter $otherLabel TERMINAL (e.g. powershell):"
