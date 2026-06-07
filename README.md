@@ -180,16 +180,24 @@ Interactive mode:
 python maker.py
 ```
 
+Interactive mode asks for:
+
+- new instance name
+- platform template
+- tools to include
+- OS text for `exp/enving.txt`
+- terminal text for `exp/enving.txt`
+
 Non-interactive example:
 
 ```powershell
-python maker.py lab_agent --platform laptop --tools shell,memadd,search,return,askuser
+python maker.py lab_agent --platform laptop --tools shell,memadd,search,return,askuser --env-os "Windows 11 Pro" --env-terminal powershell
 ```
 
 Pi/Linux-style shell tools:
 
 ```bash
-python3 maker.py field_agent --platform pi --tools all
+python3 maker.py field_agent --platform pi --tools all --env-os "Raspberry Pi OS" --env-terminal bash
 ```
 
 The maker currently discovers these built-in tool names from the selected `platforms/<platform>/tools` folder:
@@ -216,6 +224,8 @@ lab_agent/
 ```
 
 Use `--force` to replace an existing generated instance directory with the same name.
+
+If `--env-os` or `--env-terminal` are omitted in a real interactive terminal, maker asks for them and shows detected defaults. If maker is run from a non-interactive pipe, it falls back to detected environment values.
 
 ## Watchdog Execution Flow
 

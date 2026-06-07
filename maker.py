@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -177,11 +178,11 @@ def render_tool_docs(selected_tools: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def detect_environment(platform: str) -> str:
+def detect_environment_values(platform: str) -> tuple[str, str]:
     if platform == "laptop":
         terminal = "powershell" if os.name == "nt" else Path(os.environ.get("SHELL", "bash")).name
         os_name = os.environ.get("OS", "Windows") if os.name == "nt" else os.uname().sysname
-        return f"OS: {os_name}\nTERMINAL: {terminal}\n"
+        return os_name, terminal
 
     terminal = Path(os.environ.get("SHELL", "bash")).name
     if os.name == "nt":
@@ -193,7 +194,19 @@ def detect_environment(platform: str) -> str:
             os_name = match.group(1) if match else os.uname().sysname
         except Exception:
             os_name = os.uname().sysname
+    return os_name, terminal
+
+
+def render_environment(os_name: str, terminal: str) -> str:
     return f"OS: {os_name}\nTERMINAL: {terminal}\n"
+
+
+def prompt_environment(platform: str) -> str:
+    detected_os, detected_terminal = detect_environment_values(platform)
+    print("\nEnvironment for this instance:")
+    os_name = prompt_value("OS", detected_os)
+    terminal = prompt_value("Terminal", detected_terminal)
+    return render_environment(os_name, terminal)
 
 
 def copy_runner(instance_name: str, target_dir: Path) -> Path:
@@ -220,6 +233,7 @@ def create_instance(
     platform: str,
     selected_tools: list[str],
     *,
+    environment_text: str | None = None,
     force: bool = False,
 ) -> Path:
     instance_name = validate_instance_name(instance_name)
@@ -253,7 +267,9 @@ def create_instance(
     copy_tools(platform, selected_tools, tools_dir)
 
     (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools), encoding="utf-8")
-    (exp_dir / "enving.txt").write_text(detect_environment(platform), encoding="utf-8")
+    if environment_text is None:
+        environment_text = render_environment(*detect_environment_values(platform))
+    (exp_dir / "enving.txt").write_text(environment_text, encoding="utf-8")
     (exp_dir / "tool_import.txt").write_text(" ".join(selected_tools) + "\n", encoding="utf-8")
 
     return runner_path
@@ -271,6 +287,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tools",
         help="Comma-separated tools to include, or 'all'. If omitted interactively, defaults to all.",
+    )
+    parser.add_argument(
+        "--env-os",
+        help="OS text to write into exp/enving.txt. If omitted, maker asks interactively.",
+    )
+    parser.add_argument(
+        "--env-terminal",
+        help="Terminal text to write into exp/enving.txt. If omitted, maker asks interactively.",
     )
     parser.add_argument(
         "--force",
@@ -294,11 +318,22 @@ def main() -> None:
     platform = (args.platform or prompt_platform(available_platforms)).strip().lower()
     platform_tools = discover_tools_for_platform(platform)
     selected_tools = normalize_tools(args.tools, platform_tools) if args.tools else prompt_tools(platform_tools)
+    detected_os, detected_terminal = detect_environment_values(platform)
+    if args.env_os or args.env_terminal:
+        environment_text = render_environment(
+            args.env_os or detected_os,
+            args.env_terminal or detected_terminal,
+        )
+    elif sys.stdin.isatty():
+        environment_text = prompt_environment(platform)
+    else:
+        environment_text = render_environment(detected_os, detected_terminal)
 
     runner_path = create_instance(
         instance_name=instance_name,
         platform=platform,
         selected_tools=selected_tools,
+        environment_text=environment_text,
         force=args.force,
     )
 
@@ -306,6 +341,9 @@ def main() -> None:
     print(f"  name: {instance_name}")
     print(f"  platform template: {platform}")
     print(f"  tools: {', '.join(selected_tools)}")
+    print("  environment:")
+    for line in environment_text.strip().splitlines():
+        print(f"    {line}")
     print(f"  runner: {runner_path.relative_to(PROJECT_ROOT)}")
     print("\nRun it with:")
     print(f"  python {runner_path.relative_to(PROJECT_ROOT)}")
