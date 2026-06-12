@@ -10,7 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 PLATFORMS_ROOT = PROJECT_ROOT / "platforms"
-RUNNER_TEMPLATE = PROJECT_ROOT / "laptop" / "run_laptop.py"
+RUNNER_TEMPLATE = PROJECT_ROOT / "platforms" / "core" / "whatchdog.py"
 TOOL_ORDER = ("shell", "memadd", "search", "return", "askuser")
 
 TOOL_DOCS = {
@@ -166,15 +166,82 @@ def prompt_tools(available_tools: list[str]) -> list[str]:
     return normalize_tools(",".join(selected), available_tools)
 
 
-def render_tool_docs(selected_tools: list[str]) -> str:
-    lines = []
-    for index, tool in enumerate(selected_tools, start=1):
+def render_tool_docs(selected_tools: list[str], platform: str | None = None) -> str:
+    """Build `exp/td.txt` content.
+
+    Prefer a platform-provided `platform/exp/td.txt` if present, then ensure
+    every `selected_tools` entry exists (append missing docs). Falls back to
+    the in-module `TOOL_DOCS` mapping for missing templates.
+    """
+    base_lines: list[str] = []
+
+    # Try to load platform-provided td.txt first
+    if platform:
+        platform_td = PLATFORMS_ROOT / platform / "exp" / "td.txt"
+        try:
+            if platform_td.exists():
+                base_text = platform_td.read_text(encoding="utf-8")
+                base_lines = [ln for ln in base_text.splitlines() if ln.strip()]
+        except Exception:
+            base_lines = []
+
+    # Helper to extract the tool name from an existing doc line
+    def _extract_tool_name(line: str) -> str | None:
+        # Remove leading numbering like "1." if present
+        stripped = re.sub(r"^\s*\d+\.\s*", "", line)
+        parts = [p.strip() for p in stripped.split(",")]
+        if len(parts) >= 3:
+            third = parts[2]
+            if " - " in third:
+                try:
+                    after = third.split(" - ", 1)[1]
+                    tool = after.split(":", 1)[0].strip()
+                    return tool if tool else None
+                except Exception:
+                    pass
+
+        m = re.search(r"Command\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
+        if m:
+            return m.group(1)
+        return None
+
+    # Build a mapping of existing tool -> doc (keep first occurrence)
+    existing: dict[str, str] = {}
+    for ln in base_lines:
+        doc_text = re.sub(r"^\s*\d+\.\s*", "", ln)
+        tool = _extract_tool_name(ln)
+        if tool and (tool not in existing):
+            existing[tool] = doc_text
+
+    # Append missing selected tools
+    for tool in selected_tools:
+        if tool in existing:
+            continue
+        module_name = TOOL_MODULE_NAMES.get(tool, f"{tool}.py")
+        command_name = "return" if tool == "return" else Path(module_name).stem
         doc = TOOL_DOCS.get(tool)
         if doc is None:
-            module_name = TOOL_MODULE_NAMES.get(tool, f"{tool}.py")
-            command_name = "return" if tool == "return" else Path(module_name).stem
             doc = f"{tool.title()}, Description: Custom tool, Command - {command_name}:TEXT, Example - {command_name}:hello"
-        lines.append(f"{index}.{doc}")
+        existing[tool] = doc
+
+    # Re-order: prefer order of existing docs from platform, then follow `selected_tools` order
+    final_docs: list[str] = []
+    # Add docs in the order they appeared in the platform file
+    for ln in base_lines:
+        tool = _extract_tool_name(ln)
+        if tool and tool in existing:
+            final_docs.append(existing.pop(tool))
+
+    # Add any remaining tools in the requested order
+    for tool in selected_tools:
+        if tool in existing:
+            final_docs.append(existing.pop(tool))
+
+    # If anything is still left (unexpected), append it
+    for leftover in existing.values():
+        final_docs.append(leftover)
+
+    lines = [f"{i+1}.{doc}" for i, doc in enumerate(final_docs)]
     return "\n".join(lines) + "\n"
 
 
@@ -266,7 +333,7 @@ def create_instance(
     runner_path = copy_runner(instance_name, target_dir)
     copy_tools(platform, selected_tools, tools_dir)
 
-    (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools), encoding="utf-8")
+    (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools, platform), encoding="utf-8")
     if environment_text is None:
         environment_text = render_environment(*detect_environment_values(platform))
     (exp_dir / "enving.txt").write_text(environment_text, encoding="utf-8")

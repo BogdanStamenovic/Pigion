@@ -330,12 +330,7 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
-    global MEMORY_VALS
-    memory_vals_block = (
-        "MEMORY VALUES:\n" + safe_json(MEMORY_VALS)
-        if MEMORY_VALS
-        else ""
-    )
+    
     return f"""
 You are an autonomous agent.
 
@@ -492,11 +487,10 @@ def decide_next_action(
         state=state,
         action_history=action_history,
     )
-
-        # Provide last evaluation context when available
+    # Provide last evaluation context when available
     last_evaluation = ""
     if last_eval:
-            last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
+        last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
 NOTE: If a LAST EVALUATION exists, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
 """
 
@@ -707,10 +701,11 @@ def build_pending_failure(
 
 def finalize_experience_if_needed(
     exp_store: ExpStore,
-    state: Dict[str, Any],
+    agent_state: Dict[str, Any],
+    program_state: Dict[str, Any],
     successful_action: str,
 ) -> None:
-    pending = state.get("pending_failure")
+    pending = agent_state.get("pending_failure")
     if not pending or not successful_action:
         return
 
@@ -722,8 +717,8 @@ def finalize_experience_if_needed(
         failed_action=str(pending.get("failed_action", "")),
         successful_action=successful_action,
     )
-    state["pending_failure"] = None
-    state["last_exp_write"] = {
+    agent_state["pending_failure"] = None
+    program_state["last_exp_write"] = {
         "status": "written",
         "successful_action": successful_action,
         "written_at": time.time(),
@@ -920,7 +915,6 @@ def run_agent(goal: str) -> None:
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
-            print(MEMORY_VALS)
             print(
                 f"🔄 ACTION ROUND {round_index + 1}/{MAX_ACTIONS_PER_STEP} tokens_used={tokens_used}"
             )
@@ -953,7 +947,7 @@ def run_agent(goal: str) -> None:
                     tool_result = run_tool(next_action, memory, agent_state)
                     memory = tool_result["memory"]
                     agent_state = tool_result["state"]
-                    finalize_experience_if_needed(exp_store, agent_state, next_action)
+                    finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
                 else:
                     agent_state["pending_failure"] = None
 
@@ -1037,7 +1031,7 @@ def run_agent(goal: str) -> None:
 
             if eval_status == "done":
                 print(f"✅ STEP COMPLETE AFTER ACTION: {next_action}")
-                finalize_experience_if_needed(exp_store, agent_state, next_action)
+                finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
                 program_state["exp_cache_loaded"] = len(exp_store.entries)
                 step_done = True
                 completed_steps.append(current_step)
