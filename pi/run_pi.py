@@ -42,7 +42,7 @@ SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
 MEMORY_VALS: Dict[str, Any] = {}
-
+USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "True")).lower() in ("1", "true", "yes")
 # =========================
 # ENV LOADERS
 # =========================
@@ -330,7 +330,6 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
-    
     return f"""
 You are an autonomous agent.
 
@@ -414,6 +413,88 @@ def call_llm(prompt: str, system_prompt: str) -> Dict[str, Any]:
     raise RuntimeError(f"LLM call failed after retries: {last_error}")
 
 
+def formalize_goal(goal: str) -> str:
+    """
+    Transform the user goal into a precise, operational task specification.
+
+    Returns plain text only. This function MUST NOT produce JSON, plans,
+    numbered steps, tool calls, or add information not implied by the goal.
+    """
+    system = """
+        You are a goal formalizer.
+
+Transform the user's goal into a clearer and more explicit version of the same goal.
+
+Rules:
+- Preserve the original objective.
+- Do not create a plan.
+- Do not create steps.
+- Do not suggest tools or commands.
+- Do not add new requirements.
+- Make implicit assumptions explicit.
+- Make locations, files, directories, repositories, URLs, resources, and targets explicit when mentioned.
+- Clarify ambiguous references when possible from context.
+- Keep the result concise.
+- Emphasize the usage of bulk operations. Do not suggest doing things one by one if the goal implies multiple items.
+- The output should still read like a goal, not like documentation or a specification.
+- Return plain text only.
+
+Example 1:
+Input:
+Sort the files in D:\Test into folders by extension.
+
+Output:
+Go into the folder D:\Test, identify the file type of each file based on its extension, and move each file into a subfolder within D:\Test named after that extension (for example, move "report.pdf" into "D:\Test\pdf\report.pdf"). If a subfolder for an extension does not exist, create it.
+Example 2:
+Input:
+Make a file called test.txt on my desktop and open it.
+
+Output:
+Go into the users desktop folder and write the required content into the file called test.txt, and open that desktop file in Notepad.
+
+The output should not contatin implications. Everything implied should be explicitly stated.
+For example. If the user says "Sort the files in this folder", you should NOT ommit the directions to change the folder. Nothing should be implied!
+    """
+
+    prompt = f"User goal:\n{goal}\n\nReturn the formalized task specification as plain text only."
+
+    added_tokens = count_tokens(system + "\n\n" + prompt) + MAX_OUTPUT_TOKENS
+    last_error: Optional[Exception] = None
+    for attempt in range(1, MAX_LLM_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=system + "\n\n" + prompt,
+                config=types.GenerateContentConfig(
+                    temperature=TEMPERATURE,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                ),
+            )
+
+            raw = (response.text or "").strip()
+            global tokens_used
+            tokens_used += added_tokens
+
+            # strip common code fences if the model added them
+            if raw.startswith("```"):
+                # remove first fence line
+                parts = raw.split("\n")
+                if len(parts) > 1:
+                    parts = parts[1:]
+                    if parts and parts[-1].strip().endswith("```"):
+                        parts = parts[:-1]
+                    raw = "\n".join(parts).strip()
+
+            return raw
+
+        except Exception as e:
+            last_error = e
+            print(f"Goal formalizer retry {attempt}/{MAX_LLM_RETRIES} due to: {e}")
+            time.sleep(1)
+
+    raise RuntimeError(f"Goal formalizer failed after retries: {last_error}")
+
+
 
 # =========================
 # PLAN
@@ -467,7 +548,7 @@ def decide_next_action(
     state: Dict[str, Any],
     program_state: Dict[str, Any],
     action_history: List[Dict[str, Any]],
-    last_eval: Optional[Dict[str, Any]] = None,
+    last_eval: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if program_state.get("force_next_action") != None:
         helper = program_state["force_next_action"]
@@ -491,7 +572,7 @@ def decide_next_action(
     last_evaluation = ""
     if last_eval:
         last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
-NOTE: If a LAST EVALUATION exists, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
+NOTE: The LAST EVALUATION is only for reference, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
 """
 
     prompt = f"""
@@ -515,7 +596,9 @@ RULES:
 - If CURRENT STEP is already complete, return status "done" and next_action "".
 - If blocked, return status "fail" and next_action "".
 - If continuing, return exactly one valid tool action in next_action.
+- PREFER actions that can be executed in BULK when using SHELL.
 """
+    print(prompt)
     result = call_llm(prompt, system)
 
     result.setdefault("status", "fail")
@@ -666,10 +749,21 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "memory": memory,
             "state": local_state,
         }
+     if action.startswith("askuser:"):
+        output = input(action[len("askuser:") :].strip())
+        local_state["last_tool_output"] = output
+        return {
+            "ok": True,
+            "output": output,
+            "memory": memory,
+            "state": local_state,
+        }
+
     parts = action.split(":", 1)
     if len(parts) == 2:
         prefix, suffix = parts
         return TOOLS[prefix](suffix, memory, local_state)
+
     local_state["last_tool_output"] = "UNKNOWN_TOOL"
     return {
         "ok": False,
@@ -782,11 +876,14 @@ def apply_recovery_decision(
     recovery_attempts: int,
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
+   
     mode = recovery.get("recovery", "abort_goal")
     print(f"🩹 RECOVERY MODE: {mode} | {recovery.get('reason', '')}")
 
     if mode == "retry":
+
         recovery_attempts += 1
+
         if recovery_attempts > MAX_RECOVERY_ATTEMPTS:
             raise RuntimeError(f"Too many recovery attempts for step: {current_step}")
         # If we have a retry action, try to find which past similarity entry
@@ -832,6 +929,7 @@ def apply_recovery_decision(
         }
 
     if mode == "replace_step":
+
         steps[current_step_index] = recovery.get("new_step", current_step)
         current_step = steps[current_step_index]
         recovery_attempts += 1
@@ -889,10 +987,26 @@ def run_agent(goal: str) -> None:
         "force_next_action": None,
     }
 
+    # Preserve original goal and optionally run the goal formalizer
+    original_goal = goal
+    formalized_goal = original_goal
+    if USE_GOAL_FORMALIZER:
+        try:
+            formalized_goal = formalize_goal(original_goal)
+        except Exception as e:
+            print(f"Goal formalizer error, falling back to original goal: {e}")
+            formalized_goal = original_goal
+
+    # Store for debugging/inspection
+    program_state["original_goal"] = original_goal
+    program_state["formalized_goal"] = formalized_goal
+
     print("\n🚀 START: Initializing agent for goal")
+    print("ORIGINAL GOAL:", original_goal)
+    print("FORMALIZED GOAL:", formalized_goal)
     print("📋 PLAN GENERATION: Creating plan framework")
 
-    steps = create_plan(goal, memory=memory, state=agent_state)
+    steps = create_plan(formalized_goal, memory=memory, state=agent_state)
     completed_steps: List[str] = []
 
     print("PLAN:", steps)
@@ -907,14 +1021,14 @@ def run_agent(goal: str) -> None:
         current_step = steps[current_step_index]
         action_history: List[Dict[str, Any]] = []
         recovery_attempts = 0
-        step_done = False
 
+        step_done = False
         # Track the last evaluation result so the decider can consider it
         last_eval: Optional[Dict[str, Any]] = None
-
         print(f"\n➡️ STEP {current_step_index + 1}: {current_step}")
 
         for round_index in range(MAX_ACTIONS_PER_STEP):
+            print(agent_state)
             print(
                 f"🔄 ACTION ROUND {round_index + 1}/{MAX_ACTIONS_PER_STEP} tokens_used={tokens_used}"
             )
@@ -923,9 +1037,8 @@ def run_agent(goal: str) -> None:
                 raise RuntimeError(
                     f"Token limit exceeded for goal: {tokens_used}/{TOKENS_PER_GOAL} tokens used"
                 )
-
             decision = decide_next_action(
-                goal=goal,
+                goal=formalized_goal,
                 plan=steps,
                 current_step_index=current_step_index,
                 current_step=current_step,
@@ -959,7 +1072,7 @@ def run_agent(goal: str) -> None:
             if status == "fail":
                 print(f"❌ DECISION FAIL: {reason}")
                 recovery = recover_from_failure(
-                    goal=goal,
+                    goal=formalized_goal,
                     plan=steps,
                     current_step_index=current_step_index,
                     current_step=current_step,
@@ -1011,7 +1124,7 @@ def run_agent(goal: str) -> None:
             )
 
             evaluation = evaluate_action(
-                goal=goal,
+                goal=formalized_goal,
                 plan=steps,
                 current_step_index=current_step_index,
                 current_step=current_step,
@@ -1023,7 +1136,7 @@ def run_agent(goal: str) -> None:
                 tool_output=tool_output,
             )
 
-            # Provide the evaluation to the decider on the next round
+            # Make the last evaluator output available to the decider on the next round
             last_eval = evaluation
 
             eval_status = str(evaluation.get("status", "")).strip().lower()
@@ -1041,7 +1154,7 @@ def run_agent(goal: str) -> None:
             if eval_status == "fail":
                 print(f"❌ ACTION EVALUATION FAIL: {eval_reason}")
                 recovery = recover_from_failure(
-                    goal=goal,
+                    goal=formalized_goal,
                     plan=steps,
                     current_step_index=current_step_index,
                     current_step=current_step,
@@ -1101,8 +1214,8 @@ def run_agent(goal: str) -> None:
 # =========================
 if __name__ == "__main__":
     try:
-        run_agent(
-            "use askuser.")
+        run_agent( 
+            "You need to find the temperature of a device called 'pigion', it is an rpi zero w 2 runnig Debian Trixie, the username is: bodas and the password is: Dobrica111. Remember that you do not have a true interactive shell.")
     finally:
         try:
             client.close()

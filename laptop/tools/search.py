@@ -55,7 +55,7 @@ def run_search(
 
         # Ako je link -> parsiraj stranicu
         if _is_url(query):
-            page = ddgs.extract(query, fmt="text_plain")
+            page = ddgs.extract(query, fmt="text_markdown")
             content = str(page.get("content", "")).strip()
 
             return {

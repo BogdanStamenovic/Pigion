@@ -526,13 +526,6 @@ RULES:
 - Do NOT create subplans.
 - Do NOT execute anything.
 - Do NOT include extra fields.
-
-IMPORTANT:
-The step MUST have clear boundaries.
-AVOID wordings like: Analyze the files, inspect all files.
-
-INSTEAD use: Make the folders. Categorize every file programatically.
-YOU MUST FORCE BATCH BY BATCH SHELL USAGE.
 """
     result = call_llm(prompt, system)
     steps = result.get("steps", [])
@@ -603,7 +596,7 @@ RULES:
 - If CURRENT STEP is already complete, return status "done" and next_action "".
 - If blocked, return status "fail" and next_action "".
 - If continuing, return exactly one valid tool action in next_action.
-- PREFER actions that can be executed in BULK.
+- PREFER actions that can be executed in BULK when using SHELL.
 """
     print(prompt)
     result = call_llm(prompt, system)
@@ -874,12 +867,12 @@ def apply_recovery_decision(
     recovery_attempts: int,
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    global TEMPERATURE
+   
     mode = recovery.get("recovery", "abort_goal")
     print(f"🩹 RECOVERY MODE: {mode} | {recovery.get('reason', '')}")
 
     if mode == "retry":
-        TEMPERATURE = min(0.9, TEMPERATURE + 0.1)
+
         recovery_attempts += 1
 
         if recovery_attempts > MAX_RECOVERY_ATTEMPTS:
@@ -927,7 +920,7 @@ def apply_recovery_decision(
         }
 
     if mode == "replace_step":
-        TEMPERATURE = min(0.9, TEMPERATURE + 0.1)
+
         steps[current_step_index] = recovery.get("new_step", current_step)
         current_step = steps[current_step_index]
         recovery_attempts += 1
@@ -965,7 +958,7 @@ def apply_recovery_decision(
 # MAIN LOOP
 # =========================
 def run_agent(goal: str) -> None:
-    global returned_output, tokens_used, TEMPERATURE
+    global returned_output, tokens_used
     returned_output = ""
     tokens_used = 0
 
@@ -1019,7 +1012,7 @@ def run_agent(goal: str) -> None:
         current_step = steps[current_step_index]
         action_history: List[Dict[str, Any]] = []
         recovery_attempts = 0
-        TEMPERATURE = 0.3
+
         step_done = False
         # Track the last evaluation result so the decider can consider it
         last_eval: Optional[Dict[str, Any]] = None
@@ -1212,8 +1205,8 @@ def run_agent(goal: str) -> None:
 # =========================
 if __name__ == "__main__":
     try:
-        run_agent(
-            "In the dekstop folder make a file caled stevicpicka.txt and write 'Stevic Picka' in it. and then open it in notepad to the user.")
+        run_agent( 
+            "You need to find the temperature of a device called 'pigion', it is an rpi zero w 2 runnig Debian Trixie, the username is: bodas and the password is: Dobrica111. Remember that you do not have a true interactive shell.")
     finally:
         try:
             client.close()
