@@ -728,8 +728,74 @@ RULES:
     result.setdefault("reason", "No reason provided")
     return result
 
+def start_interactive_mode(
+    goal: str,
+    plan: List[str],
+    current_step_index: int,
+    current_step: str,
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+    tool: str,
+    output: str,) -> Dict[str, Any]:
+    local_state = dict(state)
+    ExitInteractiveMode = False
+    action_history.append(
+                "INTERACTIVE_MODE_STARTED",
+            )
+    while not ExitInteractiveMode:
+        system = build_system_prompt(
+        goal=goal,
+        plan=plan,
+        current_step_index=current_step_index,
+        current_step=current_step,
+        completed_steps=completed_steps,
+        memory=memory,
+        state=local_state,
+        action_history=action_history,
+    )
+        prompt = f"""
+INTERACTIVE MODE active for tool: {tool}
 
+All the text you input under INPUT: will be sent to the tool {tool} for execution. The tool's output will be displayed under OUTPUT:.
 
+Return ONLY:
+{{
+  "INPUT": "...",
+  "reason": "..."
+}}
+
+RULES:
+- All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
+- The output will be displayed under OUTPUT:.
+- To exit interactive mode, finish the program causing it or enter ^C or ^Z
+
+OUTPUT:
+{output}
+"""
+        
+        result = call_llm(prompt, system)
+        full = TOOLS[tool](result.get("INPUT", ""), memory, local_state)
+        output = full.get("tool_output", "")
+        if full.get("completed", False):
+            ExitInteractiveMode = True
+        local_state = full.get("state", local_state)
+        action_history.append(
+                {
+                    "INPUT": result.get("INPUT", ""),
+                    "OUTPUT": output,
+                }
+            )
+    action_history.append(
+                "INTERACTIVE_MODE_ENDED",
+            )
+    return {
+        "ok": True,
+        "output": output,
+        "memory": memory,
+        "state": local_state,
+    }
 # =========================
 # TOOL EXECUTION
 # =========================
@@ -749,7 +815,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "memory": memory,
             "state": local_state,
         }
-     if action.startswith("askuser:"):
+    if action.startswith("askuser:"):
         output = input(action[len("askuser:") :].strip())
         local_state["last_tool_output"] = output
         return {
@@ -1112,6 +1178,19 @@ def run_agent(goal: str) -> None:
                 raise RuntimeError(f"Model returned empty next_action while status was '{status}'")
 
             tool_result = run_tool(next_action, memory, agent_state)
+            if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
+                tool_result = start_interactive_mode(
+                    goal=formalized_goal,
+                    plan=steps,
+                    current_step_index=current_step_index,
+                    current_step=current_step,
+                    completed_steps=completed_steps,
+                    memory=memory,
+                    state=agent_state,
+                    action_history=action_history,
+                    tool=next_action.split(":", 1)[0],
+                    output=tool_result.get("output", ""),
+                )
             memory = tool_result["memory"]
             agent_state = tool_result["state"]
             tool_output = str(tool_result["output"])
