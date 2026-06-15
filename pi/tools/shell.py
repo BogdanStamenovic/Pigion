@@ -3,6 +3,7 @@ import pty
 import select
 import sys
 import signal
+import time
 import threading
 import shlex
 import re
@@ -204,7 +205,7 @@ def _sanitize_output(s: str, sudo_password: str | None, sudo_prompt: str | None)
     s = re.sub(r"(?m)^printf .*\\n$", "", s)
 
     # Remove remaining bash 'command not found' lines
-    s = re.sub(r"(?m)^\s*bash: .*: command not found\s*$", "", s)
+    #s = re.sub(r"(?m)^\s*bash: .*: command not found\s*$", "", s)
 
     # Collapse blank lines introduced by removals
     lines = [ln for ln in s.splitlines() if ln.strip() != ""]
@@ -404,60 +405,196 @@ def run_shell(command, sudo: bool = False, sudo_password: str | None = None, tim
                 rest_tokens = tokens if tokens else [command]
 
             rest_command = " ".join(rest_tokens).strip()
-            # If we have a sudo password, run the sudo command in a subprocess
-            # and return its output directly (avoids PTY prompt noise).
+            # If we have a sudo password, run the sudo command(s) in a subprocess
+            # and return their output directly (avoids PTY prompt noise).
+            # To handle compound commands (e.g. `cmd1 && cmd2`) and to recover
+            # from apt/dpkg cache-lock contention, split on `&&` and run each
+            # subcommand sequentially. If a cache lock is detected we will try
+            # to identify and terminate the holding process before retrying.
             if sudo_password is not None:
-                # Build the command string to execute under /bin/bash -c
+                # Build a base command string; `rest_command` already omits an
+                # initial `sudo` token when present.
                 try:
                     first_tok = tokens[0]
                 except Exception:
                     first_tok = None
 
-                if first_tok == "sudo":
-                    if len(tokens) > 1:
-                        rest_join = shlex.join(tokens[1:])
-                        full_cmd = f"sudo -S -p '' {rest_join}"
-                    else:
-                        full_cmd = f"sudo -S -p '' {rest_command}"
-                else:
-                    full_cmd = f"sudo -S -p '' {rest_command}"
+                combined = rest_command
 
-                # Use Popen so we can stream stdout while supplying the
-                # password on stdin immediately. This allows callers to see
-                # incremental output for long-running commands.
-                proc = subprocess.Popen(
-                    full_cmd,
-                    shell=True,
-                    cwd=_START_CWD,
-                    env=os.environ.copy(),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    executable="/bin/bash",
-                    bufsize=1,
-                    universal_newlines=True,
-                )
-
-                # Send the password early so sudo can consume it when needed.
-                try:
-                    if proc.stdin and sudo_password is not None:
-                        proc.stdin.write(sudo_password + "\n")
-                        proc.stdin.flush()
-                except Exception:
-                    pass
+                # Split on `&&` (simple heuristic). This keeps shell operators
+                # like `&&` from being quoted and lets us run each piece
+                # separately so we can retry/handle locking issues per-piece.
+                parts = [p.strip() for p in re.split(r"\s*&&\s*", combined) if p.strip()]
 
                 out_chunks = []
-                if proc.stdout is not None:
-                    for line in proc.stdout:
-                        out_chunks.append(line)
-                        if stream:
+
+                def _attempt_kill_holder(pid):
+                    try:
+                        pid = int(pid)
+                    except Exception:
+                        return False
+                    # Check whether the process exists
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        return False
+                    # Try graceful termination first
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except PermissionError:
+                        # Fall back to invoking sudo kill with provided password
+                        try:
+                            kp = subprocess.Popen(
+                                f"sudo -S -p '' kill -TERM {pid}",
+                                shell=True,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True,
+                                executable="/bin/bash",
+                            )
                             try:
-                                sys.stdout.write(line)
-                                sys.stdout.flush()
+                                kp.communicate(sudo_password + "\n", timeout=5)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                    # Wait for the process to disappear
+                    for _ in range(10):
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.5)
+                        except OSError:
+                            return True
+
+                    # Try SIGKILL as a last resort
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except PermissionError:
+                        try:
+                            kp = subprocess.Popen(
+                                f"sudo -S -p '' kill -KILL {pid}",
+                                shell=True,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True,
+                                executable="/bin/bash",
+                            )
+                            try:
+                                kp.communicate(sudo_password + "\n", timeout=5)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                    for _ in range(10):
+                        try:
+                            os.kill(pid, 0)
+                            time.sleep(0.5)
+                        except OSError:
+                            return True
+
+                    return False
+
+                # Execute each subcommand sequentially and collect output.
+                for part in parts:
+                    subcmd = part
+                    # If the subcommand itself begins with `sudo`, strip it to
+                    # avoid producing `sudo sudo ...` when we wrap below.
+                    if subcmd.startswith("sudo "):
+                        subcmd = subcmd[len("sudo "):].lstrip()
+
+                    full_cmd = f"sudo -S -p '' {subcmd}"
+                    print(full_cmd)
+
+                    attempts = 0
+                    max_attempts = 3
+
+                    while attempts < max_attempts:
+                        proc = subprocess.Popen(
+                            full_cmd,
+                            shell=True,
+                            cwd=_START_CWD,
+                            env=os.environ.copy(),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            executable="/bin/bash",
+                            bufsize=1,
+                            universal_newlines=True,
+                        )
+
+                        # Send the password early so sudo can consume it when needed.
+                        try:
+                            if proc.stdin and sudo_password is not None:
+                                proc.stdin.write(sudo_password + "\n")
+                                proc.stdin.flush()
+                        except Exception:
+                            pass
+
+                        part_out = []
+                        saw_lock = False
+                        lock_pid = None
+
+                        if proc.stdout is not None:
+                            for line in proc.stdout:
+                                part_out.append(line)
+                                if stream:
+                                    try:
+                                        sys.stdout.write(line)
+                                        sys.stdout.flush()
+                                    except Exception:
+                                        pass
+
+                                # Detect apt/dpkg cache-lock messages and extract PID if present.
+                                if ("Waiting for cache lock" in line) or ("Could not get lock" in line) or ("held by process" in line):
+                                    saw_lock = True
+                                    m = re.search(r"held by process (\d+)", line)
+                                    if m:
+                                        try:
+                                            lock_pid = int(m.group(1))
+                                        except Exception:
+                                            lock_pid = None
+                                    # break out to handle the lock
+                                    break
+
+                        # Ensure the subprocess is waited on / terminated appropriately
+                        if saw_lock:
+                            try:
+                                proc.terminate()
+                                try:
+                                    proc.wait(timeout=2)
+                                except Exception:
+                                    proc.kill()
                             except Exception:
                                 pass
 
-                proc.wait()
+                            # Try to clear the lock using the reported PID or by probing with lsof
+                            if lock_pid:
+                                _attempt_kill_holder(lock_pid)
+                            else:
+                                try:
+                                    lsof_out = subprocess.check_output("lsof -t /var/lib/dpkg/lock-frontend || true", shell=True, universal_newlines=True)
+                                    for l in lsof_out.split():
+                                        try:
+                                            _attempt_kill_holder(int(l))
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                            attempts += 1
+                            time.sleep(1)
+                            continue
+
+                        # Normal completion: collect output and move to next subcommand
+                        proc.wait()
+                        raw_part_output = "".join(part_out)
+                        out_chunks.append(raw_part_output)
+                        break
+
                 raw_out = "".join(out_chunks)
                 policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
                 nonempty = [ln for ln in raw_out.splitlines() if ln.strip() != ""]
@@ -576,7 +713,7 @@ def shell_reset():
 
 def shell(command, memory, local_state):
     if "sudo" in command:
-        output = str(run_shell(command, sudo=True, stream=True, truncate=True))
+        output = str(run_shell(command, sudo=True, stream=True, truncate=True, sudo_password="Dobrica111"))
     else:
         output = str(run_shell(command, stream=True, truncate=True))
 

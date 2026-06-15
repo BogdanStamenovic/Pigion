@@ -749,7 +749,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "memory": memory,
             "state": local_state,
         }
-     if action.startswith("askuser:"):
+    if action.startswith("askuser:"):
         output = input(action[len("askuser:") :].strip())
         local_state["last_tool_output"] = output
         return {
