@@ -3,24 +3,33 @@ import pty
 import select
 import sys
 import signal
-import time
 import threading
 import shlex
 import re
 import subprocess
+import time
+from typing import Any, Dict, List, Optional
 
 _SHELL_PID = None
 _SHELL_FD = None
 _COUNTER = 0
 _LOCK = threading.Lock()
 
+# Captured interactive session state
+_INTERACTIVE_MODE = False
+_ACTIVE_MARKER = None
+
 # Capture cwd from the importing process
 _START_CWD = os.getcwd()
 _DOTENV_LOADED = False
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 MAX_SHELL_OUTPUT_CHARS = int(os.environ.get("MAX_SHELL_OUTPUT", "200000"))
 DEFAULT_TAIL_LINES = int(os.environ.get("SHELL_TAIL_LINES", "50"))
 TRUNCATE_MIN_LINES = int(os.environ.get("SHELL_TRUNCATE_MIN_LINES", "20"))
+INTERACTIVE_IDLE_SECONDS = float(os.environ.get("SHELL_INTERACTIVE_IDLE_SECONDS", "30"))
+INTERACTIVE_PROMPT_GRACE_SECONDS = float(os.environ.get("SHELL_INTERACTIVE_PROMPT_GRACE_SECONDS", "0.5"))
+
 TRUNCATE_EXEMPT_COMMANDS = {
     "cat",
     "echo",
@@ -38,9 +47,7 @@ TRUNCATE_EXEMPT_COMMANDS = {
     "watch",
 }
 
-# Per-command truncation/filtering policies. Keys are compiled regexes
-# that match the command string. Policies contain `suppress_patterns` (list
-# of regex strings to remove) and an optional `tail_lines` fallback.
+# Per-command truncation/filtering policies.
 DEFAULT_TRUNCATION_POLICIES = {
     re.compile(r"\bnmap\b"): {
         "suppress_patterns": [
@@ -71,8 +78,26 @@ DEFAULT_TRUNCATION_POLICIES = {
     },
 }
 
+# Heuristics for interactive waits/prompt states.
+INTERACTIVE_PROMPT_PATTERNS = [
+    r"(?i)\[sudo\]\s*password\s*for\s*.*:\s*$",
+    r"(?i)(?:^|\n)\s*password\s*:\s*$",
+    r"(?i)(?:^|\n)\s*passphrase\s*:\s*$",
+    r"(?i)(?:^|\n).*(?:continue connecting|are you sure you want to continue connecting).*(?:yes/no|y/n).*$",
+    r"(?i)(?:^|\n).*\((?:yes/no|y/n)\)\s*\??\s*$",
+    r"(?m)^(?:mysql|mariadb|psql|sqlite3|ftp|ssh|plink|python|python3|ipython|bash|sh|zsh|powershell|cmd|node|ruby|perl|gdb|lldb|nc|telnet)[^\n]*[>#] ?$",
+    r"(?m)^.*@\S+:[^#\n]*[#\$]\s*$",
+    r"(?m)^.*:>\s*$",
+    r"(?m)^.*»\s*$",
+    r"(?m)^\s*>>> ?$",
+    r"(?m)^\s*\.\.\. ?$",
+    r"(?i)(?:^|\n).*press\s+(?:enter|return|any key).*$",
+    r"(?i)(?:^|\n).*type\s+help\s+for\s+help.*$",
+    r"(?i)(?:^|\n).*hit\s+enter.*$",
+]
 
-def _shell_alive():
+
+def _shell_alive() -> bool:
     global _SHELL_PID
 
     if _SHELL_PID is None:
@@ -85,8 +110,11 @@ def _shell_alive():
         return False
 
 
-def _drain(timeout=0.05):
+def _drain(timeout: float = 0.05) -> str:
     global _SHELL_FD
+
+    if _SHELL_FD is None:
+        return ""
 
     chunks = []
 
@@ -97,10 +125,7 @@ def _drain(timeout=0.05):
             break
 
         try:
-            chunk = os.read(_SHELL_FD, 4096).decode(
-                "utf-8",
-                errors="replace",
-            )
+            chunk = os.read(_SHELL_FD, 4096).decode("utf-8", errors="replace")
         except OSError:
             break
 
@@ -109,7 +134,7 @@ def _drain(timeout=0.05):
     return "".join(chunks)
 
 
-def _start_shell():
+def _start_shell() -> None:
     global _SHELL_PID, _SHELL_FD
 
     if _shell_alive():
@@ -119,8 +144,6 @@ def _start_shell():
 
     if pid == 0:
         # CHILD PROCESS
-
-        # Start in caller's cwd
         os.chdir(_START_CWD)
 
         os.environ["TERM"] = "xterm-256color"
@@ -142,16 +165,10 @@ def _start_shell():
     _SHELL_FD = fd
 
     # Disable prompt
-    os.write(
-        _SHELL_FD,
-        b"export PS1=''\n",
-    )
+    os.write(_SHELL_FD, b"export PS1=''\n")
 
     # Disable command echoing
-    os.write(
-        _SHELL_FD,
-        b"stty -echo\n",
-    )
+    os.write(_SHELL_FD, b"stty -echo\n")
 
     # Clear startup noise
     _drain()
@@ -170,54 +187,40 @@ def _strip_ansi(s: str) -> str:
         return s
 
 
-def _sanitize_output(s: str, sudo_password: str | None, sudo_prompt: str | None) -> str:
-    """Sanitize PTY/subprocess output to remove prompts, passwords, and control sequences.
-
-    This is best-effort: it strips ANSI escapes, known sudo prompts, and
-    attempts to remove occurrences of the password and common bash/sudo noise.
-    """
+def _sanitize_output(s: str, sudo_password: Optional[str], sudo_prompt: Optional[str]) -> str:
+    """Sanitize PTY/subprocess output to remove prompts, passwords, and control sequences."""
     if not s:
         return ""
 
-    # Strip ANSI sequences first
     s = _strip_ansi(s)
 
-    # Remove our custom sudo prompt markers
-    s = re.sub(r"__SUDO_PROMPT_\d+__", "", s)
+    # Remove our custom marker if it leaks through
+    s = re.sub(r"__CMD_DONE_\d+__", "", s)
 
-    # Remove literal password echoes (best-effort)
     if sudo_password:
         try:
-            # remove full-line bash errors that echo the password as a command
-            s = re.sub(rf"(?m)^\s*bash:\s*{re.escape(sudo_password)}:\s*command not found\s*$", "", s)
+            s = re.sub(
+                rf"(?m)^\s*bash:\s*{re.escape(sudo_password)}:\s*command not found\s*$",
+                "",
+                s,
+            )
         except re.error:
             pass
         s = s.replace(sudo_password, "")
 
-    # Remove sudo password prompt lines
     s = re.sub(r"(?mi)^\s*\[sudo\]\s*password\s*for\s*.*:.*$", "", s)
-
-    # Remove common sudo/binary messages that are not command output
     s = re.sub(r"(?mi)^\s*sudo:.*password.*$", "", s)
     s = re.sub(r"(?m)^\s*sudo: a password is required\s*$", "", s)
 
-    # Remove printf/pipe artifacts
     s = re.sub(r"(?m)^printf .*\\n$", "", s)
+    s = re.sub(r"(?m)^\s*bash: .*: command not found\s*$", "", s)
 
-    # Remove remaining bash 'command not found' lines
-    #s = re.sub(r"(?m)^\s*bash: .*: command not found\s*$", "", s)
-
-    # Collapse blank lines introduced by removals
     lines = [ln for ln in s.splitlines() if ln.strip() != ""]
     return "\n".join(lines).strip()
 
 
 def _load_dotenv(path: str) -> None:
-    """Load simple KEY=VALUE lines from a .env file into os.environ if missing.
-
-    This is intentionally minimal: it ignores export keywords and comments,
-    and only sets variables that are not already present in the environment.
-    """
+    """Load simple KEY=VALUE lines from a .env file into os.environ if missing."""
     try:
         if not os.path.exists(path):
             return
@@ -234,16 +237,15 @@ def _load_dotenv(path: str) -> None:
                 key, val = line.split("=", 1)
                 key = key.strip()
                 val = val.strip()
-                # remove surrounding quotes
+
                 if (val.startswith('"') and val.endswith('"')) or (
                     val.startswith("'") and val.endswith("'")
                 ):
                     val = val[1:-1]
 
-                if key and (key not in os.environ):
+                if key and key not in os.environ:
                     os.environ[key] = val
     except Exception:
-        # Fail silently — dotenv is a convenience only
         return
 
 
@@ -269,11 +271,11 @@ def _is_truncation_exempt(command_str: str) -> bool:
         tokens = command_str.split()
     if not tokens:
         return False
-    # skip leading sudo
+
     tok = tokens[0]
     if tok == "sudo" and len(tokens) > 1:
         tok = tokens[1]
-    # If the command is a shell -c wrapper, try to inspect the executed token.
+
     if tok in ("sh", "bash") and "-c" in tokens:
         try:
             cidx = tokens.index("-c")
@@ -285,10 +287,11 @@ def _is_truncation_exempt(command_str: str) -> bool:
             tok = inner or tok
         except Exception:
             pass
+
     return tok in TRUNCATE_EXEMPT_COMMANDS
 
 
-def _apply_truncation(output: str, policy: dict | None, tail_lines: int | None, force_tail: bool = False):
+def _apply_truncation(output: str, policy: Optional[dict], tail_lines: Optional[int], force_tail: bool = False) -> str:
     if not output:
         return output
 
@@ -327,8 +330,6 @@ def _apply_truncation(output: str, policy: dict | None, tail_lines: int | None, 
     else:
         filtered = [ln for ln in lines if ln.strip() != ""]
 
-    # If caller asked to force tailing, or suppression removed everything,
-    # return the last `effective_tail` non-empty lines.
     if not filtered or (not policy and force_tail):
         nonempty = [ln for ln in lines if ln.strip() != ""]
         keep = nonempty[-effective_tail:] if effective_tail and len(nonempty) > effective_tail else nonempty
@@ -347,43 +348,283 @@ def _apply_truncation(output: str, policy: dict | None, tail_lines: int | None, 
     return res
 
 
-def run_shell(command, sudo: bool = False, sudo_password: str | None = None, timeout: float = 1.0, stream: bool = True, truncate: bool = False, truncate_policy: dict | None = None, tail_lines: int | None = None):
-    """Execute a shell `command` in a persistent pty-backed bash.
+def _looks_like_interactive_prompt(text: str) -> bool:
+    if not text:
+        return False
 
-    If `sudo` is True and `sudo_password` is provided, the function will
-    run the command via `sudo -S -p <PROMPT>` and send the password when
-    sudo prompts. If `sudo` is True and `sudo_password` is None, the
-    command is executed with `sudo -n` (non-interactive) so it fails fast
-    if a password is required.
+    cleaned = _strip_ansi(text)
+    for pat in INTERACTIVE_PROMPT_PATTERNS:
+        try:
+            if re.search(pat, cleaned):
+                return True
+        except re.error:
+            continue
+
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    if not lines:
+        return False
+
+    last = lines[-1]
+    if len(last) <= 140 and (last.endswith(":") or last.endswith(">") or last.endswith("?")):
+        if "<" not in last and "http" not in last:
+            return True
+
+    return False
+
+
+def _extract_session_label(text: str) -> Optional[str]:
+    """Return a stable label for interactive sessions such as @Pigion or @bettercap."""
+    if not text:
+        return None
+
+    cleaned = _strip_ansi(text)
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    for ln in reversed(lines[-10:]):
+        m = re.search(r"(?P<user>[^@\s]+)@(?P<host>[^:\s]+)[:#\$].*", ln)
+        if m:
+            host = m.group("host").strip()
+            if host:
+                return f"@{host}"
+
+        if "»" in ln:
+            return "@bettercap"
+
+        if re.search(r"(?m)^.*:>\s*$", ln):
+            return "@interactive"
+
+        if re.search(r"(?m)^.*>\s*$", ln) and not ln.startswith(("http://", "https://")):
+            return "@interactive"
+
+    return None
+
+
+def _extract_path_candidate(text: str) -> Optional[str]:
+    """Pull the first obvious path-like line from command output."""
+    if not text:
+        return None
+
+    cleaned = _strip_ansi(text)
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if re.match(r"^(?:/[^\s]*|~(?:/.*)?|[A-Za-z]:[\\/].*)$", line):
+            return line
+
+    return None
+
+
+def _format_cwd_display(cwd: str, session_label: Optional[str] = None) -> str:
+    """Format cwd for state so remote/interactive sessions remain explicit."""
+    if not cwd:
+        return cwd
+
+    if session_label:
+        prefix = f"{session_label} - "
+        if not cwd.startswith(prefix):
+            return f"{prefix}{cwd}"
+
+    return cwd
+
+
+def _send_to_shell(text: str) -> None:
+    global _SHELL_FD
+
+    if _SHELL_FD is None:
+        raise RuntimeError("Shell is not initialized.")
+
+    if text is None:
+        text = ""
+
+    if text == "":
+        os.write(_SHELL_FD, b"\n")
+        return
+
+    for line in text.splitlines():
+        os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
+
+
+def _read_until_marker_or_idle(
+    marker: str,
+    timeout: float = 0.2,
+    stream: bool = True,
+    truncate: bool = False,
+    truncate_policy: Optional[dict] = None,
+    tail_lines: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    global _COUNTER
+    Read from PTY until marker is seen, or until the shell appears to wait for input
+    for INTERACTIVE_IDLE_SECONDS without marker progress.
+    """
+    global _SHELL_FD
+
+    if _SHELL_FD is None:
+        return {"output": "", "completed": False, "interactive_mode": False}
+
+    chunks: List[str] = []
+    buffer = ""
+    last_activity = time.monotonic()
+    prompt_seen = False
+
+    while True:
+        r, _, _ = select.select([_SHELL_FD], [], [], timeout)
+
+        if not r:
+            idle_for = time.monotonic() - last_activity
+
+            if prompt_seen and _shell_alive() and idle_for >= INTERACTIVE_PROMPT_GRACE_SECONDS:
+                raw = "".join(chunks)
+                if marker in raw:
+                    raw = raw.split(marker)[0]
+
+                policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(raw)
+                nonempty = [ln for ln in raw.splitlines() if ln.strip() != ""]
+                should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(raw))
+                if should_trunc:
+                    raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
+
+                return {
+                    "output": _sanitize_output(raw, None, None),
+                    "completed": False,
+                    "interactive_mode": True,
+                }
+
+            # If no marker after a long idle period, assume the process is waiting
+            # for user input.
+            if _shell_alive() and idle_for >= INTERACTIVE_IDLE_SECONDS:
+                raw = "".join(chunks)
+                if marker in raw:
+                    raw = raw.split(marker)[0]
+
+                policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(raw)
+                nonempty = [ln for ln in raw.splitlines() if ln.strip() != ""]
+                should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(raw))
+                if should_trunc:
+                    raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
+
+                return {
+                    "output": _sanitize_output(raw, None, None),
+                    "completed": False,
+                    "interactive_mode": True,
+                }
+
+            continue
+
+        try:
+            chunk = os.read(_SHELL_FD, 4096).decode("utf-8", errors="replace")
+        except OSError:
+            break
+
+        if not chunk:
+            continue
+
+        chunks.append(chunk)
+        buffer += chunk
+        last_activity = time.monotonic()
+
+        if _looks_like_interactive_prompt(buffer):
+            prompt_seen = True
+
+        if stream:
+            try:
+                if marker in chunk:
+                    to_print = chunk.split(marker)[0]
+                else:
+                    to_print = chunk
+                sys.stdout.write(to_print)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        if marker in buffer:
+            raw = "".join(chunks)
+            raw = raw.split(marker)[0]
+
+            policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(raw)
+            nonempty = [ln for ln in raw.splitlines() if ln.strip() != ""]
+            should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(raw))
+            if should_trunc:
+                raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
+
+            if prompt_seen or _looks_like_interactive_prompt(raw):
+                return {
+                    "output": _sanitize_output(raw, None, None),
+                    "completed": False,
+                    "interactive_mode": True,
+                }
+
+            return {
+                "output": _sanitize_output(raw, None, None),
+                "completed": True,
+                "interactive_mode": False,
+            }
+
+        if not _shell_alive():
+            break
+
+    raw = "".join(chunks)
+    if marker in raw:
+        raw = raw.split(marker)[0]
+
+    policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(raw)
+    nonempty = [ln for ln in raw.splitlines() if ln.strip() != ""]
+    should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(raw))
+    if should_trunc:
+        raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
+
+    return {
+        "output": _sanitize_output(raw, None, None),
+        "completed": False,
+        "interactive_mode": prompt_seen,
+    }
+
+
+def run_shell(
+    command,
+    sudo: bool = False,
+    sudo_password: Optional[str] = None,
+    timeout: float = 0.2,
+    stream: bool = True,
+    truncate: bool = False,
+    truncate_policy: Optional[dict] = None,
+    tail_lines: Optional[int] = None,
+):
+    """
+    Execute a shell command in a persistent pty-backed bash.
+
+    If output stalls for INTERACTIVE_IDLE_SECONDS and marker is not seen, return:
+        {
+            "output": "...partial output...",
+            "interactive_mode": True,
+            "completed": False
+        }
+
+    If _INTERACTIVE_MODE is already active, treat `command` as INPUT to the
+    currently running process and do not create a new marker.
+    """
+    global _COUNTER, _INTERACTIVE_MODE, _ACTIVE_MARKER
 
     with _LOCK:
         _start_shell()
 
-        _COUNTER += 1
-        marker = f"__CMD_DONE_{_COUNTER}__"
+        # If we are already in interactive mode, treat the incoming text as input
+        # to the live process, not a fresh command.
+        continuing_interactive = _INTERACTIVE_MODE and (_ACTIVE_MARKER is not None)
 
-        password_sent = False
-        sudo_prompt = None
-        piped_pw = False
-
-        # Prepare and send the command
+        # Keep old sudo handling behavior.
         if sudo:
-            # If no explicit password provided, try environment and .env
             if sudo_password is None:
-                # Try existing environment first
                 sudo_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
 
-                # Load .env lazily if not found
                 if (sudo_password is None) and (not _DOTENV_LOADED):
-                    # .env is located in the project root
                     _load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
-                    # mark loaded regardless of success to avoid repeated I/O
                     globals()["_DOTENV_LOADED"] = True
                     sudo_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
 
-            # Parse the command to handle cases where user already prefixed with sudo
             tokens = []
             try:
                 tokens = shlex.split(command)
@@ -394,207 +635,64 @@ def run_shell(command, sudo: bool = False, sudo_password: str | None = None, tim
             rest_tokens = []
 
             if tokens and tokens[0] == "sudo":
-                # collect sudo options (tokens starting with '-')
                 i = 1
                 while i < len(tokens) and tokens[i].startswith("-"):
                     options.append(tokens[i])
                     i += 1
-
                 rest_tokens = tokens[i:]
             else:
                 rest_tokens = tokens if tokens else [command]
 
             rest_command = " ".join(rest_tokens).strip()
-            # If we have a sudo password, run the sudo command(s) in a subprocess
-            # and return their output directly (avoids PTY prompt noise).
-            # To handle compound commands (e.g. `cmd1 && cmd2`) and to recover
-            # from apt/dpkg cache-lock contention, split on `&&` and run each
-            # subcommand sequentially. If a cache lock is detected we will try
-            # to identify and terminate the holding process before retrying.
+
+            # If we have a sudo password, keep existing non-interactive behavior.
             if sudo_password is not None:
-                # Build a base command string; `rest_command` already omits an
-                # initial `sudo` token when present.
                 try:
                     first_tok = tokens[0]
                 except Exception:
                     first_tok = None
 
-                combined = rest_command
+                if first_tok == "sudo":
+                    if len(tokens) > 1:
+                        rest_join = shlex.join(tokens[1:])
+                        full_cmd = f"sudo -S -p '' {rest_join}"
+                    else:
+                        full_cmd = f"sudo -S -p '' {rest_command}"
+                else:
+                    full_cmd = f"sudo -S -p '' {rest_command}"
 
-                # Split on `&&` (simple heuristic). This keeps shell operators
-                # like `&&` from being quoted and lets us run each piece
-                # separately so we can retry/handle locking issues per-piece.
-                parts = [p.strip() for p in re.split(r"\s*&&\s*", combined) if p.strip()]
+                proc = subprocess.Popen(
+                    full_cmd,
+                    shell=True,
+                    cwd=_START_CWD,
+                    env=os.environ.copy(),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    executable="/bin/bash",
+                    bufsize=1,
+                    universal_newlines=True,
+                )
+
+                try:
+                    if proc.stdin and sudo_password is not None:
+                        proc.stdin.write(sudo_password + "\n")
+                        proc.stdin.flush()
+                except Exception:
+                    pass
 
                 out_chunks = []
-
-                def _attempt_kill_holder(pid):
-                    try:
-                        pid = int(pid)
-                    except Exception:
-                        return False
-                    # Check whether the process exists
-                    try:
-                        os.kill(pid, 0)
-                    except OSError:
-                        return False
-                    # Try graceful termination first
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except PermissionError:
-                        # Fall back to invoking sudo kill with provided password
-                        try:
-                            kp = subprocess.Popen(
-                                f"sudo -S -p '' kill -TERM {pid}",
-                                shell=True,
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                universal_newlines=True,
-                                executable="/bin/bash",
-                            )
+                if proc.stdout is not None:
+                    for line in proc.stdout:
+                        out_chunks.append(line)
+                        if stream:
                             try:
-                                kp.communicate(sudo_password + "\n", timeout=5)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-
-                    # Wait for the process to disappear
-                    for _ in range(10):
-                        try:
-                            os.kill(pid, 0)
-                            time.sleep(0.5)
-                        except OSError:
-                            return True
-
-                    # Try SIGKILL as a last resort
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except PermissionError:
-                        try:
-                            kp = subprocess.Popen(
-                                f"sudo -S -p '' kill -KILL {pid}",
-                                shell=True,
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                universal_newlines=True,
-                                executable="/bin/bash",
-                            )
-                            try:
-                                kp.communicate(sudo_password + "\n", timeout=5)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-
-                    for _ in range(10):
-                        try:
-                            os.kill(pid, 0)
-                            time.sleep(0.5)
-                        except OSError:
-                            return True
-
-                    return False
-
-                # Execute each subcommand sequentially and collect output.
-                for part in parts:
-                    subcmd = part
-                    # If the subcommand itself begins with `sudo`, strip it to
-                    # avoid producing `sudo sudo ...` when we wrap below.
-                    if subcmd.startswith("sudo "):
-                        subcmd = subcmd[len("sudo "):].lstrip()
-
-                    full_cmd = f"sudo -S -p '' {subcmd}"
-                    print(full_cmd)
-
-                    attempts = 0
-                    max_attempts = 3
-
-                    while attempts < max_attempts:
-                        proc = subprocess.Popen(
-                            full_cmd,
-                            shell=True,
-                            cwd=_START_CWD,
-                            env=os.environ.copy(),
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            executable="/bin/bash",
-                            bufsize=1,
-                            universal_newlines=True,
-                        )
-
-                        # Send the password early so sudo can consume it when needed.
-                        try:
-                            if proc.stdin and sudo_password is not None:
-                                proc.stdin.write(sudo_password + "\n")
-                                proc.stdin.flush()
-                        except Exception:
-                            pass
-
-                        part_out = []
-                        saw_lock = False
-                        lock_pid = None
-
-                        if proc.stdout is not None:
-                            for line in proc.stdout:
-                                part_out.append(line)
-                                if stream:
-                                    try:
-                                        sys.stdout.write(line)
-                                        sys.stdout.flush()
-                                    except Exception:
-                                        pass
-
-                                # Detect apt/dpkg cache-lock messages and extract PID if present.
-                                if ("Waiting for cache lock" in line) or ("Could not get lock" in line) or ("held by process" in line):
-                                    saw_lock = True
-                                    m = re.search(r"held by process (\d+)", line)
-                                    if m:
-                                        try:
-                                            lock_pid = int(m.group(1))
-                                        except Exception:
-                                            lock_pid = None
-                                    # break out to handle the lock
-                                    break
-
-                        # Ensure the subprocess is waited on / terminated appropriately
-                        if saw_lock:
-                            try:
-                                proc.terminate()
-                                try:
-                                    proc.wait(timeout=2)
-                                except Exception:
-                                    proc.kill()
+                                sys.stdout.write(line)
+                                sys.stdout.flush()
                             except Exception:
                                 pass
 
-                            # Try to clear the lock using the reported PID or by probing with lsof
-                            if lock_pid:
-                                _attempt_kill_holder(lock_pid)
-                            else:
-                                try:
-                                    lsof_out = subprocess.check_output("lsof -t /var/lib/dpkg/lock-frontend || true", shell=True, universal_newlines=True)
-                                    for l in lsof_out.split():
-                                        try:
-                                            _attempt_kill_holder(int(l))
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-
-                            attempts += 1
-                            time.sleep(1)
-                            continue
-
-                        # Normal completion: collect output and move to next subcommand
-                        proc.wait()
-                        raw_part_output = "".join(part_out)
-                        out_chunks.append(raw_part_output)
-                        break
-
+                proc.wait()
                 raw_out = "".join(out_chunks)
                 policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
                 nonempty = [ln for ln in raw_out.splitlines() if ln.strip() != ""]
@@ -603,96 +701,87 @@ def run_shell(command, sudo: bool = False, sudo_password: str | None = None, tim
                     processed = _apply_truncation(raw_out, policy, tail_lines, force_tail=truncate)
                 else:
                     processed = raw_out
-                return _sanitize_output(processed, sudo_password, None)
 
-            # Non-interactive sudo: don't prompt for password (use PTY)
+                return {
+                    "output": _sanitize_output(processed, sudo_password, None),
+                    "interactive_mode": False,
+                    "completed": True,
+                }
+
+            # If no sudo password is available, fall through to PTY path.
             escaped = _escape_single_quotes(rest_command)
             opt_str = (" " + " ".join(options)) if options else ""
             wrapped = f"sudo -n{opt_str} bash -c '{escaped}'"
+            _send_to_shell(wrapped)
 
-            os.write(_SHELL_FD, (wrapped + "\n").encode("utf-8"))
         else:
-            # Send command line-by-line (existing behaviour)
-            for line in command.splitlines():
-                os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
+            if continuing_interactive:
+                # Feed INPUT to the existing live process.
+                SPECIAL_KEYS = {
+    "SIGINT": b"\x03",  # SIGINT
+    "EOF": b"\x04",  # EOF
+    "SIGTSTP": b"\x1A",  # SIGTSTP
+}           
+                if command in SPECIAL_KEYS:
+                    os.write(_SHELL_FD, SPECIAL_KEYS[command])
+                else:
+                    _send_to_shell(command)
 
-        # Send completion marker
-        os.write(
-            _SHELL_FD,
-            f'printf "{marker}\\n"\n'.encode("utf-8"),
+            else:
+                _COUNTER += 1
+                marker = f"__CMD_DONE_{_COUNTER}__"
+                _ACTIVE_MARKER = marker
+
+                # Send command
+                for line in command.splitlines():
+                    os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
+
+                # Completion marker. If the command enters an interactive program,
+                # this marker will only be reached once that program exits.
+                os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
+
+        marker = _ACTIVE_MARKER if _ACTIVE_MARKER is not None else f"__CMD_DONE_{_COUNTER}__"
+
+        read_result = _read_until_marker_or_idle(
+            marker=marker,
+            timeout=timeout,
+            stream=stream,
+            truncate=truncate,
+            truncate_policy=truncate_policy,
+            tail_lines=tail_lines,
         )
 
-        output = []
-        buffer = ""
+        output = read_result["output"]
+        completed = bool(read_result["completed"])
+        interactive_mode = bool(read_result["interactive_mode"])
 
-        while True:
-            r, _, _ = select.select([_SHELL_FD], [], [], timeout)
+        if completed:
+            _INTERACTIVE_MODE = False
+            _ACTIVE_MARKER = None
+        elif interactive_mode:
+            _INTERACTIVE_MODE = True
+            # Keep marker alive so later INPUT can continue the same session.
+        else:
+            if continuing_interactive:
+                _INTERACTIVE_MODE = True
 
-            if not r:
-                continue
-
-            try:
-                chunk = os.read(_SHELL_FD, 4096).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-            except OSError:
-                break
-
-            output.append(chunk)
-            buffer += chunk
-
-            # Stream to local stdout immediately if requested
-            if stream and chunk:
-                try:
-                    if marker in chunk:
-                        to_print = chunk.split(marker)[0]
-                    else:
-                        to_print = chunk
-                    # Print raw chunk so interactive programs (like nmap)
-                    # retain their formatting/animation.
-                    sys.stdout.write(to_print)
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-
-            # If we detect the sudo prompt and have a password, send it once
-            if sudo_prompt and (sudo_prompt in buffer) and (not password_sent):
-                if (not piped_pw) and (sudo_password is not None):
-                    os.write(_SHELL_FD, (sudo_password + "\n").encode("utf-8"))
-                password_sent = True
-                # Clear the buffer so we don't try to re-detect the prompt
-                buffer = ""
-
-            if marker in chunk:
-                break
-
-        result = "".join(output)
-
-        # Remove marker and everything after it
-        result = result.split(marker)[0]
-
-        # Apply truncation/filtering to the returned value only (streaming
-        # remains unchanged by default). If the caller supplied a
-        # `truncate_policy` or `truncate=True`, apply the matched policy.
-        policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
-        nonempty = [ln for ln in result.splitlines() if ln.strip() != ""]
-        should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(command))
-        if should_trunc:
-            result = _apply_truncation(result, policy, tail_lines, force_tail=truncate)
-
-        # Sanitize PTY output for control sequences and sudo noise
-        return _sanitize_output(result, sudo_password, sudo_prompt)
+        return {
+            "output": output,
+            "interactive_mode": _INTERACTIVE_MODE,
+            "completed": completed,
+        }
 
 
-def shell_reset():
-    global _SHELL_PID, _SHELL_FD
+def shell_reset(command=None, memory=None, local_state = None):
+    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _ACTIVE_MARKER
 
     pid = _SHELL_PID
     fd = _SHELL_FD
 
     _SHELL_PID = None
     _SHELL_FD = None
+    _INTERACTIVE_MODE = False
+    _ACTIVE_MARKER = None
 
     if pid is not None:
         try:
@@ -711,29 +800,54 @@ def shell_reset():
         except OSError:
             pass
 
-def shell(command, memory, local_state):
-    if "sudo" in command:
-        output = str(run_shell(command, sudo=True, stream=True, truncate=True, sudo_password="Dobrica111"))
-    else:
-        output = str(run_shell(command, stream=True, truncate=True))
 
-        # After executing a shell command, query the persistent shell for its CURRENT_WORKING_DIRECTORY
+def shell(command, memory, local_state):
+    result = run_shell(command, stream=True, truncate=True)
+
+    output = str(result.get("output", ""))
+    interactive_mode = bool(result.get("interactive_mode", False))
+    completed = bool(result.get("completed", True))
+
+    # Track both input and output in state.
+    local_state["last_action"] = command
+    local_state["last_tool_output"] = output
+    local_state["INTERACTIVE_MODE"] = "ON" if interactive_mode else "OFF"
+    local_state["INTERACTIVE_COMPLETED"] = completed
+
+    # Preserve a stable label for interactive sessions such as @Pigion or @bettercap.
+    session_label = _extract_session_label(output) or local_state.get("SESSION_LABEL")
+    if session_label:
+        local_state["SESSION_LABEL"] = session_label
+
+    # Update cwd from either explicit cwd output or from remote-shell context.
     try:
-        pwd_out = run_shell("pwd")
-        if isinstance(pwd_out, str):
-                # take last non-empty line as CURRENT_WORKING_DIRECTORY
-            lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
-            if lines:
-                new_cwd = lines[-1]
-                local_state["CURRENT_WORKING_DIRECTORY"] = new_cwd
+        cwd_candidate = _extract_path_candidate(output)
+
+        if cwd_candidate:
+            local_state["CURRENT_WORKING_DIRECTORY"] = _format_cwd_display(cwd_candidate, session_label)
+        elif not interactive_mode and completed:
+            pwd_result = run_shell("pwd", stream=False, truncate=False)
+            if isinstance(pwd_result, dict):
+                pwd_out = str(pwd_result.get("output", ""))
+            else:
+                pwd_out = str(pwd_result)
+
+            pwd_candidate = _extract_path_candidate(pwd_out)
+            if pwd_candidate:
+                local_state["CURRENT_WORKING_DIRECTORY"] = _format_cwd_display(pwd_candidate, session_label)
+        elif interactive_mode and session_label and local_state.get("CURRENT_WORKING_DIRECTORY"):
+            existing = str(local_state.get("CURRENT_WORKING_DIRECTORY", "")).strip()
+            if existing and not existing.startswith(f"{session_label} - "):
+                if re.match(r"^(?:/[^\s]*|~(?:/.*)?|[A-Za-z]:[\\/].*)$", existing):
+                    local_state["CURRENT_WORKING_DIRECTORY"] = _format_cwd_display(existing, session_label)
     except Exception:
-            # If anything goes wrong, keep existing CURRENT_WORKING_DIRECTORY (or fallback to os.getcwd())
         local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
 
-    local_state["last_tool_output"] = output
     return {
-            "ok": True,
-            "output": output,
-            "memory": memory,
-            "state": local_state,
-        }
+        "ok": True,
+        "output": output,
+        "memory": memory,
+        "state": local_state,
+        "interactive_mode": interactive_mode,
+        "completed": completed,
+    }

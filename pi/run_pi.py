@@ -62,6 +62,12 @@ def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path
             to_import.append(to_process[0])
         tools = {}
         for imp in to_import:
+            if imp == "shell_reset":
+                imp = "shell"
+                imp2 = "shell_reset"
+                tools[imp2] = import_module(f"{NAME}.tools.{imp}")
+                tools[imp2] = getattr(tools[imp2], imp2)
+                continue
             if imp == "return":
                 imp = "return_value"
             print(f"tools.{imp}")
@@ -728,8 +734,76 @@ RULES:
     result.setdefault("reason", "No reason provided")
     return result
 
+def start_interactive_mode(
+    goal: str,
+    plan: List[str],
+    current_step_index: int,
+    current_step: str,
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+    tool: str,
+    output: str,) -> Dict[str, Any]:
+    local_state = dict(state)
+    ExitInteractiveMode = False
+    print(f"🔧 INTERACTIVE MODE STARTED for tool: {tool}. Type your input under INPUT: and press Enter. To exit, finish the program or enter ^C or ^Z.")
+    action_history.append(
+                "INTERACTIVE_MODE_STARTED",
+            )
+    while not ExitInteractiveMode:
+        system = build_system_prompt(
+        goal=goal,
+        plan=plan,
+        current_step_index=current_step_index,
+        current_step=current_step,
+        completed_steps=completed_steps,
+        memory=memory,
+        state=local_state,
+        action_history=action_history,
+    )
+        prompt = f"""
+INTERACTIVE MODE active for tool: {tool}
 
+All the text you input under INPUT: will be sent to the tool {tool} for execution. The tool's output will be displayed under OUTPUT:.
 
+Return ONLY:
+{{
+  "INPUT": "...",
+  "reason": "..."
+}}
+
+RULES:
+- All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
+- The output will be displayed under OUTPUT:.
+- To EXIT interactive mode, finish the program cleanly or enter EOF into the INPUT:.
+
+OUTPUT:
+{output}
+"""
+        
+        result = call_llm(prompt, system)
+        full = TOOLS[tool](result.get("INPUT", ""), memory, local_state)
+        output = full.get("tool_output", "")
+        if full.get("completed", False):
+            ExitInteractiveMode = True
+        local_state = full.get("state", local_state)
+        action_history.append(
+                {
+                    "INPUT": result.get("INPUT", ""),
+                    "OUTPUT": output,
+                }
+            )
+    action_history.append(
+                "INTERACTIVE_MODE_ENDED",
+            )
+    return {
+        "ok": True,
+        "output": output,
+        "memory": memory,
+        "action_history": action_history,
+        "state": local_state,
+    }
 # =========================
 # TOOL EXECUTION
 # =========================
@@ -1112,17 +1186,42 @@ def run_agent(goal: str) -> None:
                 raise RuntimeError(f"Model returned empty next_action while status was '{status}'")
 
             tool_result = run_tool(next_action, memory, agent_state)
+            """if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
+                tool_result = start_interactive_mode(
+                    goal=formalized_goal,
+                    plan=steps,
+                    current_step_index=current_step_index,
+                    current_step=current_step,
+                    completed_steps=completed_steps,
+                    memory=memory,
+                    state=agent_state,
+                    action_history=action_history,
+                    tool=next_action.split(":", 1)[0],
+                    output=tool_result.get("output", ""),
+                )
+                action_history.append(tool_result.get("action_history", action_history))
+                memory = tool_result["memory"]
+                agent_state = tool_result["state"]
+                tool_output = str(tool_result["output"])
+            else:
+                memory = tool_result["memory"]
+                agent_state = tool_result["state"]
+                tool_output = str(tool_result["output"])
+                action_history.append(
+                    {
+                        "action": next_action,
+                        "tool_output": tool_output,
+                    }
+                )"""
             memory = tool_result["memory"]
             agent_state = tool_result["state"]
             tool_output = str(tool_result["output"])
-
             action_history.append(
-                {
-                    "action": next_action,
-                    "tool_output": tool_output,
-                }
+                    {
+                        "action": next_action,
+                        "tool_output": tool_output,
+                    }
             )
-
             evaluation = evaluate_action(
                 goal=formalized_goal,
                 plan=steps,
@@ -1215,7 +1314,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent( 
-            "You need to find the temperature of a device called 'pigion', it is an rpi zero w 2 runnig Debian Trixie, the username is: bodas and the password is: Dobrica111. Remember that you do not have a true interactive shell.")
+            "ssh into bodas@pigion with the password Dobrica111, while inside the server execute excatly EXACTLY this: 'pigion Make a file called Hi.txt with the word secret inside in the user home folder.' Then reset_shell and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
     finally:
         try:
             client.close()
