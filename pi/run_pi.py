@@ -62,12 +62,6 @@ def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path
             to_import.append(to_process[0])
         tools = {}
         for imp in to_import:
-            if imp == "shell_reset":
-                imp = "shell"
-                imp2 = "shell_reset"
-                tools[imp2] = import_module(f"{NAME}.tools.{imp}")
-                tools[imp2] = getattr(tools[imp2], imp2)
-                continue
             if imp == "return":
                 imp = "return_value"
             print(f"tools.{imp}")
@@ -744,7 +738,8 @@ def start_interactive_mode(
     state: Dict[str, Any],
     action_history: List[Dict[str, Any]],
     tool: str,
-    output: str,) -> Dict[str, Any]:
+    output: str,
+    program_state: Dict[str, Any],) -> Dict[str, Any]:
     local_state = dict(state)
     ExitInteractiveMode = False
     print(f"🔧 INTERACTIVE MODE STARTED for tool: {tool}. Type your input under INPUT: and press Enter. To exit, finish the program or enter ^C or ^Z.")
@@ -752,16 +747,27 @@ def start_interactive_mode(
                 "INTERACTIVE_MODE_STARTED",
             )
     while not ExitInteractiveMode:
-        system = build_system_prompt(
-        goal=goal,
-        plan=plan,
-        current_step_index=current_step_index,
-        current_step=current_step,
-        completed_steps=completed_steps,
-        memory=memory,
-        state=local_state,
-        action_history=action_history,
-    )
+        system = f"""
+You are an autonomous agent
+
+You MUST always respond in valid JSON.
+
+GLOBAL GOAL:
+{goal}
+
+CURRENT_STEP:
+{current_step}
+
+RUNTIME STATE:
+{safe_json(state)}
+
+RECENT ACTION HISTORY:
+{safe_json(trim_history(action_history))}
+
+RULES:
+-Work ONLY on the CURRENT STEP.
+-When CURRENT STEP is complete, exit interactive mode by typing exit or EOF.
+"""
         prompt = f"""
 INTERACTIVE MODE active for tool: {tool}
 
@@ -769,24 +775,25 @@ All the text you input under INPUT: will be sent to the tool {tool} for executio
 
 Return ONLY:
 {{
-  "INPUT": "...",
-  "reason": "..."
+  "reason": "...",
+  "INPUT": "..."
 }}
 
 RULES:
 - All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
 - The output will be displayed under OUTPUT:.
-- To EXIT interactive mode, finish the program cleanly or enter EOF into the INPUT:.
+- To EXIT interactive mode, finish the program cleanly or type exit or type EOF into the INPUT:.
 
 OUTPUT:
 {output}
 """
         
         result = call_llm(prompt, system)
-        full = TOOLS[tool](result.get("INPUT", ""), memory, local_state)
+        full = TOOLS[tool](result.get("INPUT", ""), memory, local_state, program_state=program_state)
         output = full.get("tool_output", "")
         if full.get("completed", False):
             ExitInteractiveMode = True
+        program_state = full.get("program_state", program_state)
         local_state = full.get("state", local_state)
         action_history.append(
                 {
@@ -802,12 +809,13 @@ OUTPUT:
         "output": output,
         "memory": memory,
         "action_history": action_history,
+        "program_state": program_state,
         "state": local_state,
     }
 # =========================
 # TOOL EXECUTION
 # =========================
-def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
+def run_tool(action: str, memory: str, state: Dict[str, Any], program_state: Dict[str, Any]) -> Dict[str, Any]:
     print(f"🔧 Executing: {action}")
 
     local_state = dict(state)
@@ -822,6 +830,7 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "output": output,
             "memory": memory,
             "state": local_state,
+            "program_state": program_state,
         }
     if action.startswith("askuser:"):
         output = input(action[len("askuser:") :].strip())
@@ -831,12 +840,13 @@ def run_tool(action: str, memory: str, state: Dict[str, Any]) -> Dict[str, Any]:
             "output": output,
             "memory": memory,
             "state": local_state,
+            "program_state": program_state,
         }
 
     parts = action.split(":", 1)
     if len(parts) == 2:
         prefix, suffix = parts
-        return TOOLS[prefix](suffix, memory, local_state)
+        return TOOLS[prefix](suffix, memory, local_state, program_state=program_state)
 
     local_state["last_tool_output"] = "UNKNOWN_TOOL"
     return {
@@ -1131,7 +1141,7 @@ def run_agent(goal: str) -> None:
             if status == "done":
                 print(f"✅ STEP DONE: {current_step}")
                 if next_action.startswith("return:"):
-                    tool_result = run_tool(next_action, memory, agent_state)
+                    tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
                     memory = tool_result["memory"]
                     agent_state = tool_result["state"]
                     finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
@@ -1185,8 +1195,8 @@ def run_agent(goal: str) -> None:
             if not next_action:
                 raise RuntimeError(f"Model returned empty next_action while status was '{status}'")
 
-            tool_result = run_tool(next_action, memory, agent_state)
-            """if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
+            tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
+            if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
                 tool_result = start_interactive_mode(
                     goal=formalized_goal,
                     plan=steps,
@@ -1198,12 +1208,15 @@ def run_agent(goal: str) -> None:
                     action_history=action_history,
                     tool=next_action.split(":", 1)[0],
                     output=tool_result.get("output", ""),
+                    program_state=program_state
                 )
                 action_history.append(tool_result.get("action_history", action_history))
+                program_state = tool_result.get("program_state", program_state)
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
                 tool_output = str(tool_result["output"])
             else:
+                program_state = tool_result.get("program_state", program_state)
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
                 tool_output = str(tool_result["output"])
@@ -1212,16 +1225,7 @@ def run_agent(goal: str) -> None:
                         "action": next_action,
                         "tool_output": tool_output,
                     }
-                )"""
-            memory = tool_result["memory"]
-            agent_state = tool_result["state"]
-            tool_output = str(tool_result["output"])
-            action_history.append(
-                    {
-                        "action": next_action,
-                        "tool_output": tool_output,
-                    }
-            )
+                )
             evaluation = evaluate_action(
                 goal=formalized_goal,
                 plan=steps,
