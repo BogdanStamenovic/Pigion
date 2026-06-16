@@ -766,7 +766,7 @@ RECENT ACTION HISTORY:
 
 RULES:
 -Work ONLY on the CURRENT STEP.
--When CURRENT STEP is complete, exit interactive mode by typing exit or EOF.
+-When CURRENT STEP is complete, exit interactive mode by typing done.
 """
         prompt = f"""
 INTERACTIVE MODE active for tool: {tool}
@@ -782,7 +782,7 @@ Return ONLY:
 RULES:
 - All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
 - The output will be displayed under OUTPUT:.
-- To EXIT interactive mode, finish the program cleanly or type exit or type EOF into the INPUT:.
+- To EXIT interactive mode, finish the program cleanly or type done into the INPUT:.
 
 OUTPUT:
 {output}
@@ -790,7 +790,7 @@ OUTPUT:
         
         result = call_llm(prompt, system)
         full = TOOLS[tool](result.get("INPUT", ""), memory, local_state, program_state=program_state)
-        output = full.get("tool_output", "")
+        output = full.get("output", "")
         if full.get("completed", False):
             ExitInteractiveMode = True
         program_state = full.get("program_state", program_state)
@@ -1210,11 +1210,22 @@ def run_agent(goal: str) -> None:
                     output=tool_result.get("output", ""),
                     program_state=program_state
                 )
-                action_history.append(tool_result.get("action_history", action_history))
                 program_state = tool_result.get("program_state", program_state)
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
                 tool_output = str(tool_result["output"])
+                evaluation = evaluate_action(
+                    goal=formalized_goal,
+                    plan=steps,
+                    current_step_index=current_step_index,
+                    current_step=current_step,
+                    completed_steps=completed_steps,
+                    memory=memory,
+                    state=agent_state,
+                    action_history=action_history,
+                    action=next_action,
+                    tool_output=tool_output,
+                )
             else:
                 program_state = tool_result.get("program_state", program_state)
                 memory = tool_result["memory"]
@@ -1226,18 +1237,18 @@ def run_agent(goal: str) -> None:
                         "tool_output": tool_output,
                     }
                 )
-            evaluation = evaluate_action(
-                goal=formalized_goal,
-                plan=steps,
-                current_step_index=current_step_index,
-                current_step=current_step,
-                completed_steps=completed_steps,
-                memory=memory,
-                state=agent_state,
-                action_history=action_history,
-                action=next_action,
-                tool_output=tool_output,
-            )
+                evaluation = evaluate_action(
+                    goal=formalized_goal,
+                    plan=steps,
+                    current_step_index=current_step_index,
+                    current_step=current_step,
+                    completed_steps=completed_steps,
+                    memory=memory,
+                    state=agent_state,
+                    action_history=action_history,
+                    action=next_action,
+                    tool_output=tool_output,
+                )
 
             # Make the last evaluator output available to the decider on the next round
             last_eval = evaluation
@@ -1318,7 +1329,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent( 
-            "ssh into bodas@pigion with the password Dobrica111, while inside the server execute excatly EXACTLY this: 'pigion Make a file called Hi.txt with the word secret inside in the user home folder.' Then reset_shell and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
+            "sshpass into bodas@pigion with the password Dobrica111, while inside the server make a file called hi.txt in which you will save the word 'secret' and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
     finally:
         try:
             client.close()

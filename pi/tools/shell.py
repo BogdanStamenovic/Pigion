@@ -794,6 +794,20 @@ def run_shell(
         continuing_interactive = _INTERACTIVE_MODE and branch_alive and (_BRANCH_FD is not None)
 
         if continuing_interactive:
+            # User-requested branch termination keyword.
+            if isinstance(command, str) and command.strip().lower() == "done":
+                _reset_branch_shell()
+                _INTERACTIVE_MODE = False
+
+                return {
+                    "output": "[interactive branch terminated]",
+                    "interactive_mode": False,
+                    "completed": True,
+                    "branch_mode": False,
+                    "session_label": None,
+                    "cwd_raw": None,
+                    "cwd_display": None,
+                }
             SPECIAL_KEYS = {
                 "SIGINT": b"\x03",
                 "EOF": b"\x04",
