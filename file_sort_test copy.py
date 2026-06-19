@@ -24,4 +24,4 @@ for filename, content in files.items():
 
 print(f"Created folder '{test_folder}' with {len(files)} files.")
 
-run_agent("Sort the files in the test folder into subfolder based on their type.")
+run_agent("Sort the files in the test folder into subfolder based on their extension.")

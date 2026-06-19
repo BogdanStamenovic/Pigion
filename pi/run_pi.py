@@ -319,7 +319,55 @@ def trim_history(action_history: List[Dict[str, Any]], keep_last: int = 8) -> Li
     return action_history[-keep_last:]
 
 
-def build_system_prompt(
+def json_only_contract() -> str:
+    return """
+You MUST always respond in valid JSON.
+Output ONLY valid JSON.
+No markdown.
+No explanation outside the requested JSON schema.
+Be concise.
+"""
+
+
+def build_planner_system_prompt(
+    goal: str,
+    memory: str,
+    state: Dict[str, Any],
+    tool_docs: str = TOOL_DOCS,
+) -> str:
+    return f"""
+You are the planning LLM for an autonomous agent.
+
+Your job is to convert the goal into a short, ordered framework of high-level
+steps. You do not execute tools, choose commands, evaluate outputs, or recover
+from failures.
+
+{json_only_contract()}
+
+SYSTEM ENVIRONMENT:
+{ENVING}
+
+AVAILABLE TOOLS:
+{tool_docs}
+
+GLOBAL GOAL:
+{goal}
+
+MEMORY:
+{memory}
+
+INITIAL RUNTIME STATE:
+{safe_json(state)}
+
+PLANNING RULES:
+- Create only the minimum plan needed to complete the goal.
+- Steps must be high-level descriptions, not tool calls.
+- Keep steps ordered and scoped so the action LLM can work on exactly one step at a time.
+- Do not assume hidden memory or external facts beyond the context above.
+"""
+
+
+def build_action_system_prompt(
     goal: str,
     plan: List[str],
     current_step_index: int,
@@ -331,12 +379,17 @@ def build_system_prompt(
     tool_docs: str = TOOL_DOCS,
 ) -> str:
     return f"""
-You are an autonomous agent.
+You are the action-selection LLM for an autonomous agent.
 
-You MUST always respond in valid JSON.
+Your job is to choose exactly one executable next action for the current step,
+or decide that the current step is done or blocked. You do not create plans,
+evaluate completed work after tool execution, or rewrite failed steps.
+
+{json_only_contract()}
 
 SYSTEM ENVIRONMENT:
 {ENVING}
+
 AVAILABLE_TOOLS:
 {tool_docs}
 
@@ -346,8 +399,17 @@ GLOBAL GOAL:
 PLAN FRAMEWORK:
 {safe_json(plan)}
 
+CURRENT STEP INDEX:
+{current_step_index}
+
+CURRENT STEP:
+{current_step}
+
 COMPLETED STEPS:
 {safe_json(completed_steps)}
+
+MEMORY:
+{memory}
 
 RUNTIME STATE:
 {safe_json(state)}
@@ -355,21 +417,208 @@ RUNTIME STATE:
 RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
-CORE EXECUTION RULES:
+ACTION SELECTION RULES:
 - The PLAN FRAMEWORK is high-level guidance only.
-- Do NOT skip ahead.
-- Do NOT optimize by doing multiple future steps early.
+- Work only on the CURRENT STEP.
+- Do not skip ahead or perform future steps early.
 - Do NOT assume hidden memory. Use only GOAL, PLAN FRAMEWORK, MEMORY, STATE, and ACTION HISTORY.
 - If you need something remembered, use the memory tool syntax (example: memadd:some value).
 - If a STEP has a lot of actions, you SHOULD use the MEMORY TOOL to keep track of what you've done and what you know.
 - You CANNOT access memadd files trough shell commands, write it yourself.
 - Actions must be valid tool commands (example: "shell:cat secret", "memadd:123").
+- Prefer bulk shell actions when that is safe and clearly within the current step.
+"""
 
-STRICT OUTPUT RULES:
-- Output ONLY valid JSON.
-- No markdown.
-- No explanation outside the requested JSON schema.
-- Be concise.
+
+def build_action_evaluator_system_prompt(
+    goal: str,
+    plan: List[str],
+    current_step_index: int,
+    current_step: str,
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+) -> str:
+    return f"""
+You are the action-evaluation LLM for an autonomous agent.
+
+Your job is to judge the result of the most recent action against the current
+step only. You do not choose the next command, create plans, or recover from
+failures.
+
+{json_only_contract()}
+
+GLOBAL GOAL:
+{goal}
+
+PLAN FRAMEWORK:
+{safe_json(plan)}
+
+CURRENT STEP INDEX:
+{current_step_index}
+
+CURRENT STEP:
+{current_step}
+
+COMPLETED STEPS:
+{safe_json(completed_steps)}
+
+MEMORY:
+{memory}
+
+RUNTIME STATE:
+{safe_json(state)}
+
+RECENT ACTION HISTORY:
+{safe_json(trim_history(action_history))}
+
+EVALUATION RULES:
+- Mark "done" only when the CURRENT STEP itself is complete.
+- Mark "ongoing" when the action helped but more work remains for the CURRENT STEP.
+- Mark "fail" when the action failed, contradicted the goal, or went outside the current step scope.
+- Do not give credit for future-step work unless it directly completes the CURRENT STEP.
+"""
+
+
+def build_recovery_system_prompt(
+    goal: str,
+    plan: List[str],
+    current_step_index: int,
+    current_step: str,
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+    tool_docs: str = TOOL_DOCS,
+) -> str:
+    return f"""
+You are the failure-recovery LLM for an autonomous agent.
+
+Your job is to decide how to continue after the current step failed. You may
+retry with a better action, replace the current step text, skip a truly
+unneeded step, or abort the goal when it cannot continue safely.
+
+{json_only_contract()}
+
+SYSTEM ENVIRONMENT:
+{ENVING}
+
+AVAILABLE TOOLS:
+{tool_docs}
+
+GLOBAL GOAL:
+{goal}
+
+PLAN FRAMEWORK:
+{safe_json(plan)}
+
+CURRENT STEP INDEX:
+{current_step_index}
+
+CURRENT STEP:
+{current_step}
+
+COMPLETED STEPS:
+{safe_json(completed_steps)}
+
+MEMORY:
+{memory}
+
+RUNTIME STATE:
+{safe_json(state)}
+
+RECENT ACTION HISTORY:
+{safe_json(trim_history(action_history))}
+
+RECOVERY RULES:
+- Diagnose the likely root cause before choosing a recovery mode.
+- Prefer a narrow retry action when the current step can still be completed.
+- Use similar past failures as hints, not ground truth.
+- Do not skip or replace a step just to avoid a solvable failure.
+- Retry actions must be valid tool commands.
+"""
+
+
+def build_plan_status_evaluator_system_prompt(
+    goal: str,
+    plan: List[str],
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+) -> str:
+    return f"""
+You are the interactive plan-status evaluator for an autonomous agent.
+
+Your job is to evaluate which plan steps are complete after an interactive tool
+session. You do not choose commands, edit the plan, or infer extra steps.
+
+{json_only_contract()}
+
+GLOBAL GOAL:
+{goal}
+
+FULL PLAN:
+{safe_json([base_plan_step(step) for step in plan])}
+
+COMPLETED STEPS:
+{safe_json(completed_steps)}
+
+MEMORY:
+{memory}
+
+RUNTIME STATE:
+{safe_json(state)}
+
+RECENT ACTION HISTORY:
+{safe_json(trim_history(action_history))}
+
+PLAN STATUS RULES:
+- Evaluate all plan steps.
+- If a step is complete, mark it as "done".
+- If a step is not complete, mark it as "todo".
+- Use the exact plan step text as the key.
+- Do not invent, remove, or rename steps.
+"""
+
+
+def build_interactive_input_system_prompt(
+    goal: str,
+    current_step: str,
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+    tool: str,
+) -> str:
+    return f"""
+You are the interactive-tool input LLM for an autonomous agent.
+
+Your job is to send exactly one input string to the active interactive tool.
+You do not choose other tools, create plans, or evaluate the whole task.
+
+{json_only_contract()}
+
+GLOBAL GOAL:
+{goal}
+
+CURRENT STEP:
+{current_step}
+
+ACTIVE INTERACTIVE TOOL:
+{tool}
+
+MEMORY:
+{memory}
+
+RUNTIME STATE:
+{safe_json(state)}
+
+INTERACTIVE INPUT RULES:
+- Work ONLY on the CURRENT STEP.
+- Return exactly one input for the active tool.
+- Do not include multiple commands separated by newlines unless the active program specifically requires a single multi-line input.
+- To exit interactive mode, finish the program cleanly or type "done" into the INPUT.
 """
 
 
@@ -421,9 +670,12 @@ def formalize_goal(goal: str) -> str:
     numbered steps, tool calls, or add information not implied by the goal.
     """
     system = """
-        You are a goal formalizer.
+You are the goal-formalization LLM for an autonomous agent.
 
-Transform the user's goal into a clearer and more explicit version of the same goal.
+Your job is to rewrite only the user's goal into a clearer, explicit task
+statement. You see the raw user goal only. You do not see tool docs, runtime
+state, memory, plans, action history, or failure history because those would
+tempt you to plan or add requirements that the user did not request.
 
 Rules:
 - Preserve the original objective.
@@ -441,10 +693,10 @@ Rules:
 
 Example 1:
 Input:
-Sort the files in D:\Test into folders by extension.
+Sort the files in D:\\Test into folders by extension.
 
 Output:
-Go into the folder D:\Test, identify the file type of each file based on its extension, and move each file into a subfolder within D:\Test named after that extension (for example, move "report.pdf" into "D:\Test\pdf\report.pdf"). If a subfolder for an extension does not exist, create it.
+Go into the folder D:\\Test, identify the file type of each file based on its extension, and move each file into a subfolder within D:\\Test named after that extension (for example, move "report.pdf" into "D:\\Test\\pdf\\report.pdf"). If a subfolder for an extension does not exist, create it.
 Example 2:
 Input:
 Make a file called test.txt on my desktop and open it.
@@ -500,15 +752,10 @@ For example. If the user says "Sort the files in this folder", you should NOT om
 # PLAN
 # =========================
 def create_plan(goal: str, memory: str, state: Dict[str, Any]) -> List[str]:
-    system = build_system_prompt(
+    system = build_planner_system_prompt(
         goal=goal,
-        plan=[],
-        current_step_index=0,
-        current_step="planning",
-        completed_steps=[],
         memory=memory,
         state=state,
-        action_history=[],
     )
 
     prompt = """
@@ -558,7 +805,7 @@ def decide_next_action(
             "reason": "Forced next action from recovery.",
             "next_action": helper,
         }
-    system = build_system_prompt(
+    system = build_action_system_prompt(
         goal=goal,
         plan=plan,
         current_step_index=current_step_index,
@@ -624,7 +871,7 @@ def evaluate_action(
     action: str,
     tool_output: str,
 ) -> Dict[str, Any]:
-    system = build_system_prompt(
+    system = build_action_evaluator_system_prompt(
         goal=goal,
         plan=plan,
         current_step_index=current_step_index,
@@ -682,7 +929,7 @@ def recover_step(
     similar_failures: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     print(similar_failures)
-    system = build_system_prompt(
+    system = build_recovery_system_prompt(
         goal=goal,
         plan=plan,
         current_step_index=current_step_index,
@@ -740,28 +987,14 @@ def evaluate_action_interactive(
     tool_output: str,
 ) -> Dict[str, Any]:
     current_step_text = base_plan_step(current_step)
-    system = f"""You are an autonomous agent evaluator
-
-You MUST always respond in valid JSON.
-
-GLOBAL GOAL:
-{goal}
-
-FULL PLAN:
-{safe_json([base_plan_step(step) for step in plan])}
-
-COMPLETED STEPS:
-{safe_json(completed_steps)}
-
-RECENT ACTION HISTORY:
-{safe_json(trim_history(action_history))}
-
-RULES:
-- Evaluate the status of ALL STEPS.
-- If a step is complete, mark it as "done".
-- If a step is not complete, mark it as "todo".
-- Use the exact plan step text as the key.
-- Do not invent, remove, or rename steps."""
+    system = build_plan_status_evaluator_system_prompt(
+        goal=goal,
+        plan=plan,
+        completed_steps=completed_steps,
+        memory=memory,
+        state=state,
+        action_history=action_history,
+    )
     prompt = f"""
 Evaluate which plan steps have been completed and which plan steps are still todo.
 
@@ -877,27 +1110,14 @@ def start_interactive_mode(
                 "INTERACTIVE_MODE_STARTED",
             )
     while not ExitInteractiveMode:
-        system = f"""
-You are an autonomous agent
-
-You MUST always respond in valid JSON.
-
-GLOBAL GOAL:
-{goal}
-
-CURRENT STEP:
-{current_step}
-
-RUNTIME STATE:
-{safe_json(state)}
-
-RECENT ACTION HISTORY:
-{safe_json(trim_history(action_history))}
-
-RULES:
--Work ONLY on the CURRENT STEP.
--When CURRENT STEP is complete, exit interactive mode by typing done.
-"""
+        system = build_interactive_input_system_prompt(
+            goal=goal,
+            current_step=current_step,
+            memory=memory,
+            state=local_state,
+            action_history=action_history,
+            tool=tool,
+        )
         prompt = f"""
 INTERACTIVE MODE active for tool: {tool}
 
@@ -914,7 +1134,7 @@ RULES:
 - Do NOT try to perform more actions using \\n.
 - All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
 - The output will be displayed under OUTPUT:.
-- To EXIT interactive mode, finish the program cleanly or type done into the INPUT:.
+- To EXIT interactive mode, finish the program cleanly or type "done" into the INPUT:.
 
 OUTPUT:
 {output}

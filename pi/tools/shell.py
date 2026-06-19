@@ -287,6 +287,21 @@ def _sanitize_output(s: str, sudo_password: Optional[str], sudo_prompt: Optional
     return "\n".join(lines).strip()
 
 
+def _extract_cwd_marker(output: str, marker: str) -> tuple[str, Optional[str]]:
+    if not output or not marker:
+        return output, None
+
+    cwd = None
+    kept_lines = []
+    for line in output.splitlines():
+        if line.startswith(marker):
+            cwd = line[len(marker):].strip() or cwd
+            continue
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip(), cwd
+
+
 def _load_dotenv(path: str) -> None:
     try:
         if not os.path.exists(path):
@@ -747,6 +762,7 @@ def _read_until_marker_or_idle_fd(
                     to_print = chunk.split(marker)[0]
                 else:
                     to_print = chunk
+                to_print = re.sub(r"(?m)^__CMD_CWD_\d+__.*(?:\n|$)", "", to_print)
                 sys.stdout.write(to_print)
                 sys.stdout.flush()
             except Exception:
@@ -1048,10 +1064,12 @@ def run_shell(
 
         _COUNTER += 1
         marker = f"__CMD_DONE_{_COUNTER}__"
+        cwd_marker = f"__CMD_CWD_{_COUNTER}__"
 
         for line in command.splitlines():
             os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
 
+        os.write(_SHELL_FD, f'printf "{cwd_marker}%s\\n" "$PWD"\n'.encode("utf-8"))
         os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
 
         read_result = _read_until_marker_or_idle_fd(
@@ -1066,6 +1084,7 @@ def run_shell(
         )
 
         output = read_result["output"]
+        output, cwd_after = _extract_cwd_marker(output, cwd_marker)
         completed = bool(read_result["completed"])
         interactive_mode = bool(read_result["interactive_mode"])
 
@@ -1080,7 +1099,7 @@ def run_shell(
             "completed": completed,
             "branch_mode": False,
             "session_label": None,
-            "cwd_raw": None,
+            "cwd_raw": cwd_after if completed else None,
             "cwd_display": None,
         }
 
@@ -1167,7 +1186,7 @@ def shell(command, memory, local_state, program_state):
     else:
         program_state["BRANCH_WORKING_DIRECTORY"] = None
         program_state["CURRENT_WORKING_DIRECTORY"] = local_state["CURRENT_WORKING_DIRECTORY"]
-
+    print(local_state["CURRENT_WORKING_DIRECTORY"])
     return {
         "ok": True,
         "output": output,
