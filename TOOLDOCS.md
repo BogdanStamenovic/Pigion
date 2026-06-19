@@ -1,0 +1,390 @@
+# Tool Authoring Guide
+
+This file documents how tools work in the current Pi runner, `pi/run_pi.py`, and how to add new tools that behave correctly in the agent loop.
+
+## Tool Discovery
+
+The Pi runner loads tool docs from:
+
+```text
+pi/exp/td.txt
+```
+
+That file serves two purposes:
+
+1. It is injected into the model prompt as the list of available tools.
+2. It is parsed by `tool_import()` to decide which Python modules to import.
+
+Each tool line should contain a comma-separated field like:
+
+```text
+Command - toolname:ARGUMENT
+```
+
+Example:
+
+```text
+6.FileRead, Description: Reads a local text file, Command - fileread:PATH, Example - fileread:README.md
+```
+
+For that line, the runner will import:
+
+```python
+from pi.tools.fileread import fileread
+```
+
+Special case: `return` maps to the module name `return_value`, but `return:TEXT` is normally handled directly by `run_tool()`.
+
+## Required Tool File Shape
+
+Create a file in:
+
+```text
+pi/tools/<toolname>.py
+```
+
+The file must expose a callable with the same name as the tool prefix:
+
+```python
+def toolname(command, memory, local_state, program_state):
+    ...
+```
+
+The current Pi runner calls tools like this:
+
+```python
+TOOLS[prefix](suffix, memory, local_state, program_state=program_state)
+```
+
+That means a compatible tool must accept `program_state` as a keyword argument.
+
+## Required Return Shape
+
+A normal tool should return a dictionary:
+
+```python
+{
+    "ok": True,
+    "output": "text or structured result",
+    "memory": memory,
+    "state": local_state,
+    "program_state": program_state,
+}
+```
+
+Recommended fields:
+
+```python
+{
+    "ok": True,
+    "output": output,
+    "memory": memory,
+    "state": local_state,
+    "program_state": program_state,
+    "interactive_mode": False,
+    "completed": True,
+}
+```
+
+Failure example:
+
+```python
+{
+    "ok": False,
+    "output": "File not found: missing.txt",
+    "error": "File not found: missing.txt",
+    "memory": memory,
+    "state": local_state,
+    "program_state": program_state,
+    "interactive_mode": False,
+    "completed": True,
+}
+```
+
+The runner mostly reasons over `output`, `state`, `memory`, and `program_state`. If a failure is returned as data instead of an exception, include enough detail in `output` for the evaluator to understand it.
+
+## State Rules
+
+Tools receive:
+
+- `command`: the text after `toolname:`.
+- `memory`: the current plain-text runtime memory.
+- `local_state`: model-visible runtime state.
+- `program_state`: loop/tool metadata.
+
+Use `local_state` for facts the model should see in future prompts, such as:
+
+- `CURRENT_WORKING_DIRECTORY`
+- `last_action`
+- `last_tool_output`
+- `MEMORYVALS`
+
+Use `program_state` for implementation metadata the agent does not need to see directly, such as:
+
+- interactive session labels
+- branch mode flags
+- caches
+- internal handles or IDs
+- plan bookkeeping such as `plan_status`
+
+Prefer copying `local_state` before mutating it:
+
+```python
+def mytool(command, memory, local_state, program_state):
+    local_state = dict(local_state)
+    local_state["last_tool_output"] = "done"
+    return {
+        "ok": True,
+        "output": "done",
+        "memory": memory,
+        "state": local_state,
+        "program_state": program_state,
+    }
+```
+
+## Minimal Tool Example
+
+```python
+def uppercase(command, memory, local_state, program_state):
+    local_state = dict(local_state)
+    output = str(command).upper()
+    local_state["last_tool_output"] = output
+
+    return {
+        "ok": True,
+        "output": output,
+        "memory": memory,
+        "state": local_state,
+        "program_state": program_state,
+        "interactive_mode": False,
+        "completed": True,
+    }
+```
+
+Add this to `pi/exp/td.txt`:
+
+```text
+6.Uppercase, Description: Converts text to uppercase, Command - uppercase:TEXT, Example - uppercase:hello
+```
+
+## Memory Tool Pattern
+
+If a tool updates `memory`, return the new memory string. If it stores structured values, put them in `local_state["MEMORYVALS"]`.
+
+Current `memadd` behavior:
+
+- `memadd:note text` appends to the memory string.
+- `memadd:key=value` updates `local_state["MEMORYVALS"][key]`.
+
+The runner does not persist `memory` to disk by default.
+
+## Interactive Mode
+
+Interactive mode is used when a tool cannot finish in one call because it started a long-lived prompt or terminal program. The Pi shell uses this for commands like:
+
+- `ssh`
+- `sftp`
+- `python`
+- `bash`
+- `mysql`
+- `psql`
+- `ftp`
+- `vim`
+- `nmap`
+
+To enter interactive mode, a tool returns:
+
+```python
+{
+    "ok": True,
+    "output": "prompt or latest terminal output",
+    "memory": memory,
+    "state": local_state,
+    "program_state": program_state,
+    "interactive_mode": True,
+    "completed": False,
+}
+```
+
+When the runner sees `interactive_mode: True`, it calls `start_interactive_mode()`. During that loop, the model produces direct input strings for the same tool. The runner calls:
+
+```python
+TOOLS[tool](input_text, memory, local_state, program_state=program_state)
+```
+
+The tool should send `input_text` into the existing interactive session, not start a new independent session.
+
+When the interactive session ends, return:
+
+```python
+{
+    "ok": True,
+    "output": "final output",
+    "memory": memory,
+    "state": local_state,
+    "program_state": program_state,
+    "interactive_mode": False,
+    "completed": True,
+}
+```
+
+The runner then calls `evaluate_action_interactive()`, which asks the model to evaluate all plan steps. The resulting `plan_status` map is stored in `program_state`, and the loop updates the plan and jumps to the next unfinished step.
+
+## Interactive Tool Requirements
+
+An interactive-capable tool needs these pieces:
+
+- A module-level session handle, process handle, socket, PTY fd, or equivalent.
+- A way to decide whether a call starts a new session or continues an existing one.
+- A stable session label stored in `program_state` or module state.
+- A completion detector.
+- A prompt/idle detector for deciding when to return control to the agent.
+- A cleanup path.
+
+For shell-like tools, do not derive a new label from every interactive input. If the launch command is `sftp bodas@pigion`, the branch should keep a label such as `sftp_interactive` for the whole branch. Passwords, `echo`, `put`, `get`, and other input lines should not create labels like `password_interactive` or `echo_interactive`.
+
+## Current Shell Interactive Design
+
+`pi/tools/shell.py` has two PTYs:
+
+- Main shell PTY for ordinary commands.
+- Branch shell PTY for interactive programs.
+
+Important module-level state:
+
+```python
+_SHELL_PID
+_SHELL_FD
+_BRANCH_PID
+_BRANCH_FD
+_BRANCH_MARKER
+_BRANCH_SESSION_LABEL
+_INTERACTIVE_MODE
+```
+
+Launch flow:
+
+1. `_should_use_branch(command)` detects known interactive launchers.
+2. `_start_branch_shell(cwd)` creates a branch PTY.
+3. The command is sent to the branch.
+4. `_read_until_marker_or_idle_fd()` reads until completion, prompt, or idle.
+5. `_branch_session_label()` chooses a stable label such as `sftp_interactive` or `@pigion`.
+6. The tool returns `interactive_mode: True` when the branch is still active.
+
+Continuation flow:
+
+1. `_INTERACTIVE_MODE` and branch liveness indicate continuation.
+2. The input text is sent to `_BRANCH_FD`.
+3. The original `_BRANCH_SESSION_LABEL` is reused.
+4. The tool returns the latest output and whether the branch is still active.
+
+Termination:
+
+- Input `done` resets the branch shell and returns `[interactive branch terminated]`.
+- Special keys such as `SIGINT`, `EOF`, and `SIGTSTP` are supported by the shell tool.
+- `shell_reset()` cleans up main and branch shells.
+
+## Working Directory Decoration
+
+The shell tool decorates `CURRENT_WORKING_DIRECTORY` while a branch session is active:
+
+```text
+sftp_interactive - /home/bogdan/Pigion_wrapper/Pigion
+```
+
+The real cwd is recovered with `_undecorate_cwd()`. It strips stacked session labels defensively, so old bad values like:
+
+```text
+password_interactive - sftp_interactive - echo_interactive - /path
+```
+
+collapse back to:
+
+```text
+/path
+```
+
+## Output Guidelines
+
+Keep tool output useful for the evaluator:
+
+- Include the actual result or a clear error message.
+- Avoid returning huge raw logs when a summary or tail is enough.
+- Scrub secrets from output.
+- Preserve enough command output for debugging.
+- Use strings unless the model benefits from structured JSON-like data.
+
+For verbose tools, consider truncation logic like `pi/tools/shell.py`.
+
+## Error Handling
+
+Tools may either:
+
+- Return `ok: False` with an `error` and useful `output`.
+- Raise an exception and let the runner fail.
+
+Returning a structured failure is usually better because it lets the evaluator and recovery logic see the problem.
+
+Example:
+
+```python
+def fileread(command, memory, local_state, program_state):
+    local_state = dict(local_state)
+    path = str(command).strip()
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            output = f.read()
+    except OSError as e:
+        output = f"{type(e).__name__}: {e}"
+        local_state["last_tool_output"] = output
+        return {
+            "ok": False,
+            "output": output,
+            "error": output,
+            "memory": memory,
+            "state": local_state,
+            "program_state": program_state,
+            "interactive_mode": False,
+            "completed": True,
+        }
+
+    local_state["last_tool_output"] = output
+    return {
+        "ok": True,
+        "output": output,
+        "memory": memory,
+        "state": local_state,
+        "program_state": program_state,
+        "interactive_mode": False,
+        "completed": True,
+    }
+```
+
+## Tool Checklist
+
+Before adding a tool:
+
+- Add `pi/tools/<toolname>.py`.
+- Define `def toolname(command, memory, local_state, program_state):`.
+- Return `ok`, `output`, `memory`, `state`, and `program_state`.
+- Update `last_tool_output` when useful.
+- Use `program_state` for internal metadata.
+- Add a `Command - toolname:...` entry to `pi/exp/td.txt`.
+- Keep the `td.txt` command prefix identical to the function name.
+- Run `python3 -m py_compile pi/tools/<toolname>.py pi/run_pi.py`.
+
+For interactive tools:
+
+- Persist session handles across calls.
+- Return `interactive_mode: True` and `completed: False` while waiting for more input.
+- Reuse the launch session label across continuation calls.
+- Return `interactive_mode: False` and `completed: True` when done.
+- Provide a cleanup/reset path.
+
+## Current Tool Compatibility Notes
+
+- `shell`, `memadd`, and the normal path of `search` follow the current `program_state`-aware contract.
+- `return` is handled by `run_tool()` before dynamic dispatch.
+- `return_value.py` does not use the standard signature and is mostly a compatibility stub.
+- `askuser.py` currently does not return and needs to be rewritten before it can be safely used by the current Pi runner.

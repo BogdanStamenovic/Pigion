@@ -18,6 +18,7 @@ _SHELL_FD = None
 _BRANCH_PID = None
 _BRANCH_FD = None
 _BRANCH_MARKER = None
+_BRANCH_SESSION_LABEL = None
 
 _COUNTER = 0
 _LOCK = threading.Lock()
@@ -220,13 +221,14 @@ def _start_branch_shell(cwd: Optional[str] = None) -> None:
 
 
 def _reset_branch_shell() -> None:
-    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
     pid = _BRANCH_PID
     fd = _BRANCH_FD
 
     _BRANCH_PID = None
     _BRANCH_FD = None
     _BRANCH_MARKER = None
+    _BRANCH_SESSION_LABEL = None
 
     if pid is not None:
         try:
@@ -471,6 +473,14 @@ def _fallback_session_label(command_str: str) -> str:
     return f"{base}_interactive"
 
 
+def _branch_session_label(command_str: str, output: str) -> str:
+    extracted = _extract_session_label(output)
+    fallback = _fallback_session_label(command_str)
+    if not extracted or extracted == "@interactive":
+        return fallback
+    return extracted
+
+
 def _decorate_cwd(cwd: str, label: Optional[str]) -> str:
     if not cwd:
         return cwd
@@ -480,12 +490,23 @@ def _decorate_cwd(cwd: str, label: Optional[str]) -> str:
     return cwd if cwd.startswith(prefix) else f"{prefix}{cwd}"
 
 
+def _is_session_label(label: str) -> bool:
+    label = label.strip()
+    if not label:
+        return False
+    return label.startswith("@") or bool(re.fullmatch(r"[A-Za-z0-9_.-]+_interactive", label))
+
+
 def _undecorate_cwd(cwd: str) -> str:
     if not cwd:
         return cwd
-    if cwd.startswith("@") and " - " in cwd:
-        return cwd.split(" - ", 1)[1].strip()
-    return cwd
+    result = cwd.strip()
+    while " - " in result:
+        label, rest = result.split(" - ", 1)
+        if not _is_session_label(label):
+            break
+        result = rest.strip()
+    return result
 
 
 def _extract_path_candidate(text: str) -> Optional[str]:
@@ -785,7 +806,7 @@ def run_shell(
     tail_lines: Optional[int] = None,
     cwd: Optional[str] = None,
 ):
-    global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER
+    global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
 
     with _LOCK:
         _start_shell()
@@ -846,9 +867,9 @@ def run_shell(
                 "interactive_mode": _INTERACTIVE_MODE,
                 "completed": completed,
                 "branch_mode": True,
-                "session_label": None,
+                "session_label": _BRANCH_SESSION_LABEL,
                 "cwd_raw": None,
-                "cwd_display": None,
+                "cwd_display": _decorate_cwd(cwd or _START_CWD, _BRANCH_SESSION_LABEL),
             }
 
         if sudo:
@@ -1006,7 +1027,8 @@ def run_shell(
             completed = bool(read_result["completed"])
             interactive_mode = bool(read_result["interactive_mode"])
 
-            branch_label = _extract_session_label(output) or _fallback_session_label(command)
+            branch_label = _branch_session_label(command, output)
+            _BRANCH_SESSION_LABEL = branch_label
 
             if completed:
                 _reset_branch_shell()
@@ -1064,7 +1086,7 @@ def run_shell(
 
 
 def shell_reset():
-    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER
+    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
 
     _reset_branch_shell()
 
@@ -1074,6 +1096,7 @@ def shell_reset():
     _SHELL_PID = None
     _SHELL_FD = None
     _INTERACTIVE_MODE = False
+    _BRANCH_SESSION_LABEL = None
 
     if pid is not None:
         try:

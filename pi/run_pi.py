@@ -727,6 +727,136 @@ RULES:
     result.setdefault("new_step", current_step)
     result.setdefault("reason", "No reason provided")
     return result
+def evaluate_action_interactive(
+    goal: str,
+    plan: List[str],
+    current_step_index: int,
+    current_step: str,
+    completed_steps: List[str],
+    memory: str,
+    state: Dict[str, Any],
+    action_history: List[Dict[str, Any]],
+    action: str,
+    tool_output: str,
+) -> Dict[str, Any]:
+    current_step_text = base_plan_step(current_step)
+    system = f"""You are an autonomous agent evaluator
+
+You MUST always respond in valid JSON.
+
+GLOBAL GOAL:
+{goal}
+
+FULL PLAN:
+{safe_json([base_plan_step(step) for step in plan])}
+
+COMPLETED STEPS:
+{safe_json(completed_steps)}
+
+RECENT ACTION HISTORY:
+{safe_json(trim_history(action_history))}
+
+RULES:
+- Evaluate the status of ALL STEPS.
+- If a step is complete, mark it as "done".
+- If a step is not complete, mark it as "todo".
+- Use the exact plan step text as the key.
+- Do not invent, remove, or rename steps."""
+    prompt = f"""
+Evaluate which plan steps have been completed and which plan steps are still todo.
+
+CURRENT STEP:
+{current_step_text}
+
+LAST ACTION:
+{action}
+
+TOOL OUTPUT:
+{tool_output}
+
+RETURN ONLY:
+{{
+"plan_status": {{
+  "exact step text": "done | todo"
+}},
+"reason": "..."
+}}
+    """
+
+    result = call_llm(prompt, system)
+    plan_status = normalize_plan_status(result, plan)
+    current_status = plan_status.get(current_step_text, "todo")
+
+    return {
+        "status": "done" if current_status == "done" else "ongoing",
+        "reason": str(result.get("reason", "No reason provided")),
+        "plan_status": plan_status,
+    }
+
+
+def base_plan_step(step: str) -> str:
+    return re.sub(r"^\[(done|todo)\]\s*", "", str(step)).strip()
+
+
+def normalize_plan_status(result: Dict[str, Any], plan: List[str]) -> Dict[str, str]:
+    raw_statuses = result.get("plan_status", result)
+    by_base_step: Dict[str, str] = {}
+
+    if isinstance(raw_statuses, list):
+        for item in raw_statuses:
+            if not isinstance(item, dict):
+                continue
+            step = base_plan_step(str(item.get("step", "")))
+            status = str(item.get("status", "todo")).strip().lower()
+            if step:
+                by_base_step[step] = "done" if status == "done" else "todo"
+    elif isinstance(raw_statuses, dict):
+        for key, value in raw_statuses.items():
+            if key in ("status", "reason", "plan_status"):
+                continue
+            step = base_plan_step(str(key))
+            if isinstance(value, dict):
+                value = value.get("status", "todo")
+            status = str(value).strip().lower()
+            if step:
+                by_base_step[step] = "done" if status == "done" else "todo"
+
+    normalized: Dict[str, str] = {}
+    for index, step in enumerate(plan):
+        base_step = base_plan_step(step)
+        numbered_key = f"step{index + 1}"
+        normalized[base_step] = by_base_step.get(
+            base_step,
+            by_base_step.get(numbered_key, "todo"),
+        )
+    return normalized
+
+
+def apply_plan_status_to_loop(
+    plan: List[str],
+    completed_steps: List[str],
+    plan_status: Dict[str, str],
+) -> Optional[int]:
+    next_todo_index: Optional[int] = None
+
+    for index, step in enumerate(plan):
+        base_step = base_plan_step(step)
+        status = "done" if plan_status.get(base_step) == "done" else "todo"
+        plan[index] = f"[{status}] {base_step}"
+
+        if status == "done":
+            if base_step not in completed_steps and plan[index] not in completed_steps:
+                completed_steps.append(base_step)
+        elif next_todo_index is None:
+            next_todo_index = index
+
+    return next_todo_index
+
+
+def plan_status_reason(plan_status: Dict[str, str]) -> str:
+    done_count = sum(1 for status in plan_status.values() if status == "done")
+    return f"Interactive evaluation marked {done_count}/{len(plan_status)} plan steps done."
+
 
 def start_interactive_mode(
     goal: str,
@@ -742,7 +872,7 @@ def start_interactive_mode(
     program_state: Dict[str, Any],) -> Dict[str, Any]:
     local_state = dict(state)
     ExitInteractiveMode = False
-    print(f"🔧 INTERACTIVE MODE STARTED for tool: {tool}. Type your input under INPUT: and press Enter. To exit, finish the program or enter ^C or ^Z.")
+    print(f"🔧 INTERACTIVE MODE STARTED for tool: {tool}.")
     action_history.append(
                 "INTERACTIVE_MODE_STARTED",
             )
@@ -755,7 +885,7 @@ You MUST always respond in valid JSON.
 GLOBAL GOAL:
 {goal}
 
-CURRENT_STEP:
+CURRENT STEP:
 {current_step}
 
 RUNTIME STATE:
@@ -780,6 +910,8 @@ Return ONLY:
 }}
 
 RULES:
+- Do NOT violate the CURRENT STEP scope.
+- Do NOT try to perform more actions using \\n.
 - All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
 - The output will be displayed under OUTPUT:.
 - To EXIT interactive mode, finish the program cleanly or type done into the INPUT:.
@@ -787,7 +919,9 @@ RULES:
 OUTPUT:
 {output}
 """
-        
+        if output == "[interactive branch terminated]":
+            ExitInteractiveMode = True
+            break
         result = call_llm(prompt, system)
         full = TOOLS[tool](result.get("INPUT", ""), memory, local_state, program_state=program_state)
         output = full.get("output", "")
@@ -795,6 +929,7 @@ OUTPUT:
             ExitInteractiveMode = True
         program_state = full.get("program_state", program_state)
         local_state = full.get("state", local_state)
+        print(local_state)
         action_history.append(
                 {
                     "INPUT": result.get("INPUT", ""),
@@ -1015,7 +1150,7 @@ def apply_recovery_decision(
     if mode == "replace_step":
 
         steps[current_step_index] = recovery.get("new_step", current_step)
-        current_step = steps[current_step_index]
+        current_step = base_plan_step(steps[current_step_index])
         recovery_attempts += 1
         if recovery_attempts > MAX_RECOVERY_ATTEMPTS:
             raise RuntimeError(f"Too many step replacements for step: {current_step}")
@@ -1102,7 +1237,7 @@ def run_agent(goal: str) -> None:
                 f"Token limit exceeded for goal: {tokens_used}/{TOKENS_PER_GOAL} tokens used"
             )
 
-        current_step = steps[current_step_index]
+        current_step = base_plan_step(steps[current_step_index])
         action_history: List[Dict[str, Any]] = []
         recovery_attempts = 0
 
@@ -1214,7 +1349,7 @@ def run_agent(goal: str) -> None:
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
                 tool_output = str(tool_result["output"])
-                evaluation = evaluate_action(
+                evaluation = evaluate_action_interactive(
                     goal=formalized_goal,
                     plan=steps,
                     current_step_index=current_step_index,
@@ -1252,6 +1387,45 @@ def run_agent(goal: str) -> None:
 
             # Make the last evaluator output available to the decider on the next round
             last_eval = evaluation
+
+            if "plan_status" in evaluation:
+                plan_status = evaluation["plan_status"]
+                if not isinstance(plan_status, dict):
+                    plan_status = normalize_plan_status(evaluation, steps)
+
+                program_state["plan_status"] = plan_status
+                next_todo_index = apply_plan_status_to_loop(
+                    steps,
+                    completed_steps,
+                    plan_status,
+                )
+                current_step_base = base_plan_step(current_step)
+                current_step_status = plan_status.get(current_step_base, "todo")
+                eval_reason = str(evaluation.get("reason", plan_status_reason(plan_status)))
+
+                print(f"📋 INTERACTIVE PLAN STATUS: {safe_json(plan_status)}")
+
+                if current_step_status == "done":
+                    finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
+                    program_state["exp_cache_loaded"] = len(exp_store.entries)
+
+                    if next_todo_index is None:
+                        print("✅ ALL PLAN STEPS COMPLETE AFTER INTERACTIVE ACTION")
+                        current_step_index = len(steps)
+                    else:
+                        print(f"✅ INTERACTIVE STEP COMPLETE; NEXT TODO STEP: {steps[next_todo_index]}")
+                        current_step_index = next_todo_index
+
+                    step_done = True
+                    break
+
+                current_step = base_plan_step(steps[current_step_index])
+                last_eval = {
+                    "status": "ongoing",
+                    "reason": eval_reason,
+                }
+                print("➡️ INTERACTIVE PLAN STILL HAS CURRENT STEP TODO")
+                continue
 
             eval_status = str(evaluation.get("status", "")).strip().lower()
             eval_reason = str(evaluation.get("reason", "No reason provided"))
