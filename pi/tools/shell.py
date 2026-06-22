@@ -10,14 +10,21 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
+# Main persistent shell
 _SHELL_PID = None
 _SHELL_FD = None
+
+# Branch shell used for interactive programs
+_BRANCH_PID = None
+_BRANCH_FD = None
+_BRANCH_MARKER = None
+_BRANCH_SESSION_LABEL = None
+
 _COUNTER = 0
 _LOCK = threading.Lock()
 
 # Captured interactive session state
 _INTERACTIVE_MODE = False
-_ACTIVE_MARKER = None
 
 # Capture cwd from the importing process
 _START_CWD = os.getcwd()
@@ -28,6 +35,7 @@ MAX_SHELL_OUTPUT_CHARS = int(os.environ.get("MAX_SHELL_OUTPUT", "200000"))
 DEFAULT_TAIL_LINES = int(os.environ.get("SHELL_TAIL_LINES", "50"))
 TRUNCATE_MIN_LINES = int(os.environ.get("SHELL_TRUNCATE_MIN_LINES", "20"))
 INTERACTIVE_IDLE_SECONDS = float(os.environ.get("SHELL_INTERACTIVE_IDLE_SECONDS", "30"))
+INTERACTIVE_PROMPT_GRACE_SECONDS = float(os.environ.get("SHELL_INTERACTIVE_PROMPT_GRACE_SECONDS", "0.5"))
 
 TRUNCATE_EXEMPT_COMMANDS = {
     "cat",
@@ -44,6 +52,45 @@ TRUNCATE_EXEMPT_COMMANDS = {
     "tr",
     "pv",
     "watch",
+}
+
+COMMAND_WRAPPERS = {
+    "sudo",
+    "sshpass",
+    "env",
+    "timeout",
+    "nohup",
+    "setsid",
+    "stdbuf",
+    "unbuffer",
+    "proxychains",
+    "proxychains4",
+    "tsocks",
+    "nice",
+    "ionice",
+    "time",
+    "doas",
+}
+
+INTERACTIVE_LAUNCHERS = {
+    "ssh", "scp", "sftp", "telnet", "ftp", "rlogin", "rsh",
+    "python", "python3", "ipython", "pypy", "node", "ruby", "perl",
+    "php", "lua", "irb", "r",
+    "bash", "sh", "zsh", "fish", "ksh", "dash",
+    "mysql", "mariadb", "psql", "sqlite3", "redis-cli", "mongo", "mongosh",
+    "gdb", "lldb", "btop", "htop", "top", "less", "more", "vim", "vi",
+    "nano", "emacs", "tmux", "screen", "bettercap", "nmap", "nc", "netcat",
+}
+
+WRAPPER_VALUE_OPTS = {
+    "sudo": {"-u": 1, "-g": 1, "-p": 1, "-k": 0, "-n": 0, "-S": 0, "-H": 0, "-E": 0},
+    "sshpass": {"-p": 1, "-f": 1, "-d": 1, "-e": 0},
+    "timeout": {"-k": 1, "-s": 1},
+    "env": {"-u": 1, "-i": 0},
+    "nice": {"-n": 1},
+    "ionice": {"-c": 1, "-n": 1, "-p": 1},
+    "stdbuf": {"-i": 1, "-o": 1, "-e": 1},
+    "doas": {"-u": 1},
 }
 
 # Per-command truncation/filtering policies.
@@ -85,6 +132,9 @@ INTERACTIVE_PROMPT_PATTERNS = [
     r"(?i)(?:^|\n).*(?:continue connecting|are you sure you want to continue connecting).*(?:yes/no|y/n).*$",
     r"(?i)(?:^|\n).*\((?:yes/no|y/n)\)\s*\??\s*$",
     r"(?m)^(?:mysql|mariadb|psql|sqlite3|ftp|ssh|plink|python|python3|ipython|bash|sh|zsh|powershell|cmd|node|ruby|perl|gdb|lldb|nc|telnet)[^\n]*[>#] ?$",
+    r"(?m)^.*@\S+:[^#\n]*[#\$]\s*$",
+    r"(?m)^.*:>\s*$",
+    r"(?m)^.*»\s*$",
     r"(?m)^\s*>>> ?$",
     r"(?m)^\s*\.\.\. ?$",
     r"(?i)(?:^|\n).*press\s+(?:enter|return|any key).*$",
@@ -93,54 +143,42 @@ INTERACTIVE_PROMPT_PATTERNS = [
 ]
 
 
-def _shell_alive() -> bool:
-    global _SHELL_PID
-
-    if _SHELL_PID is None:
+def _shell_alive(pid: Optional[int]) -> bool:
+    if pid is None:
         return False
-
     try:
-        os.kill(_SHELL_PID, 0)
+        os.kill(pid, 0)
         return True
     except OSError:
         return False
 
 
-def _drain(timeout: float = 0.05) -> str:
-    global _SHELL_FD
-
-    if _SHELL_FD is None:
+def _drain_fd(fd: Optional[int], timeout: float = 0.05) -> str:
+    if fd is None:
         return ""
-
     chunks = []
-
     while True:
-        r, _, _ = select.select([_SHELL_FD], [], [], timeout)
-
+        r, _, _ = select.select([fd], [], [], timeout)
         if not r:
             break
-
         try:
-            chunk = os.read(_SHELL_FD, 4096).decode("utf-8", errors="replace")
+            chunk = os.read(fd, 4096).decode("utf-8", errors="replace")
         except OSError:
             break
-
         chunks.append(chunk)
-
     return "".join(chunks)
 
 
-def _start_shell() -> None:
-    global _SHELL_PID, _SHELL_FD
-
-    if _shell_alive():
-        return
-
+def _spawn_pty_shell(cwd: Optional[str] = None):
     pid, fd = pty.fork()
-
     if pid == 0:
-        # CHILD PROCESS
-        os.chdir(_START_CWD)
+        try:
+            os.chdir(cwd or _START_CWD)
+        except Exception:
+            try:
+                os.chdir(_START_CWD)
+            except Exception:
+                pass
 
         os.environ["TERM"] = "xterm-256color"
         os.environ["LANG"] = "C.UTF-8"
@@ -156,27 +194,64 @@ def _start_shell() -> None:
             ],
         )
 
-    # PARENT PROCESS
-    _SHELL_PID = pid
-    _SHELL_FD = fd
+    return pid, fd
 
-    # Disable prompt
-    os.write(_SHELL_FD, b"export PS1=''\n")
 
-    # Disable command echoing
-    os.write(_SHELL_FD, b"stty -echo\n")
+def _prepare_shell_fd(fd: int) -> None:
+    os.write(fd, b"export PS1=''\n")
+    os.write(fd, b"stty -echo\n")
+    _drain_fd(fd)
 
-    # Clear startup noise
-    _drain()
+
+def _start_shell() -> None:
+    global _SHELL_PID, _SHELL_FD
+    if _shell_alive(_SHELL_PID):
+        return
+    _SHELL_PID, _SHELL_FD = _spawn_pty_shell(_START_CWD)
+    _prepare_shell_fd(_SHELL_FD)
+
+
+def _start_branch_shell(cwd: Optional[str] = None) -> None:
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER
+    if _shell_alive(_BRANCH_PID):
+        return
+    _BRANCH_PID, _BRANCH_FD = _spawn_pty_shell(cwd or _START_CWD)
+    _BRANCH_MARKER = f"__BRANCH_DONE_{time.time_ns()}__"
+    _prepare_shell_fd(_BRANCH_FD)
+
+
+def _reset_branch_shell() -> None:
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
+    pid = _BRANCH_PID
+    fd = _BRANCH_FD
+
+    _BRANCH_PID = None
+    _BRANCH_FD = None
+    _BRANCH_MARKER = None
+    _BRANCH_SESSION_LABEL = None
+
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _escape_single_quotes(s: str) -> str:
-    """Escape single quotes for safe inclusion in single-quoted shell strings."""
     return s.replace("'", "'\"'\"'")
 
 
 def _strip_ansi(s: str) -> str:
-    """Remove common ANSI escape sequences from terminal output."""
     try:
         return re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", s)
     except re.error:
@@ -184,14 +259,12 @@ def _strip_ansi(s: str) -> str:
 
 
 def _sanitize_output(s: str, sudo_password: Optional[str], sudo_prompt: Optional[str]) -> str:
-    """Sanitize PTY/subprocess output to remove prompts, passwords, and control sequences."""
     if not s:
         return ""
 
     s = _strip_ansi(s)
-
-    # Remove our custom marker if it leaks through
     s = re.sub(r"__CMD_DONE_\d+__", "", s)
+    s = re.sub(r"__BRANCH_DONE_\d+__", "", s)
 
     if sudo_password:
         try:
@@ -207,7 +280,6 @@ def _sanitize_output(s: str, sudo_password: Optional[str], sudo_prompt: Optional
     s = re.sub(r"(?mi)^\s*\[sudo\]\s*password\s*for\s*.*:.*$", "", s)
     s = re.sub(r"(?mi)^\s*sudo:.*password.*$", "", s)
     s = re.sub(r"(?m)^\s*sudo: a password is required\s*$", "", s)
-
     s = re.sub(r"(?m)^printf .*\\n$", "", s)
     s = re.sub(r"(?m)^\s*bash: .*: command not found\s*$", "", s)
 
@@ -215,18 +287,30 @@ def _sanitize_output(s: str, sudo_password: Optional[str], sudo_prompt: Optional
     return "\n".join(lines).strip()
 
 
+def _extract_cwd_marker(output: str, marker: str) -> tuple[str, Optional[str]]:
+    if not output or not marker:
+        return output, None
+
+    cwd = None
+    kept_lines = []
+    for line in output.splitlines():
+        if line.startswith(marker):
+            cwd = line[len(marker):].strip() or cwd
+            continue
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip(), cwd
+
+
 def _load_dotenv(path: str) -> None:
-    """Load simple KEY=VALUE lines from a .env file into os.environ if missing."""
     try:
         if not os.path.exists(path):
             return
-
         with open(path, "r", encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
-
                 if "=" not in line:
                     continue
 
@@ -258,7 +342,6 @@ def _match_truncation_policy(command_str: str):
 
 
 def _is_truncation_exempt(command_str: str) -> bool:
-    """Return True if the command is a simple utility that should not be truncated."""
     if not command_str:
         return False
     try:
@@ -368,24 +451,239 @@ def _looks_like_interactive_prompt(text: str) -> bool:
     return False
 
 
-def _send_to_shell(text: str) -> None:
-    global _SHELL_FD
+def _extract_session_label(text: str) -> Optional[str]:
+    if not text:
+        return None
 
-    if _SHELL_FD is None:
+    cleaned = _strip_ansi(text)
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    for ln in reversed(lines[-10:]):
+        m = re.search(r"(?P<user>[^@\s]+)@(?P<host>[^:\s]+)[:#\$].*", ln)
+        if m:
+            host = m.group("host").strip()
+            if host:
+                return f"@{host}"
+
+        if "»" in ln:
+            return "@bettercap"
+
+        if re.search(r"(?m)^.*:>\s*$", ln):
+            return "@interactive"
+
+        if re.search(r"(?m)^.*>\s*$", ln) and not ln.startswith(("http://", "https://")):
+            return "@interactive"
+
+    return None
+
+
+def _fallback_session_label(command_str: str) -> str:
+    peeled = _peel_wrappers(command_str)
+    base = peeled.get("base_token") or ""
+    if not base:
+        base = "interactive"
+    base = re.sub(r"[^A-Za-z0-9_.-]+", "_", base).strip("_") or "interactive"
+    return f"{base}_interactive"
+
+
+def _branch_session_label(command_str: str, output: str) -> str:
+    extracted = _extract_session_label(output)
+    fallback = _fallback_session_label(command_str)
+    if not extracted or extracted == "@interactive":
+        return fallback
+    return extracted
+
+
+def _decorate_cwd(cwd: str, label: Optional[str]) -> str:
+    if not cwd:
+        return cwd
+    if not label:
+        return cwd
+    prefix = f"{label} - "
+    return cwd if cwd.startswith(prefix) else f"{prefix}{cwd}"
+
+
+def _is_session_label(label: str) -> bool:
+    label = label.strip()
+    if not label:
+        return False
+    return label.startswith("@") or bool(re.fullmatch(r"[A-Za-z0-9_.-]+_interactive", label))
+
+
+def _undecorate_cwd(cwd: str) -> str:
+    if not cwd:
+        return cwd
+    result = cwd.strip()
+    while " - " in result:
+        label, rest = result.split(" - ", 1)
+        if not _is_session_label(label):
+            break
+        result = rest.strip()
+    return result
+
+
+def _extract_path_candidate(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    cleaned = _strip_ansi(text)
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^(?:/[^\s]*|~(?:/.*)?|[A-Za-z]:[\\/].*)$", line):
+            return line
+    return None
+
+
+def _peel_wrappers(command_str: str) -> Dict[str, Any]:
+    original_tokens = _tokenize_command(command_str)
+    tokens = list(original_tokens)
+    wrapper_chain: List[str] = []
+
+    changed = True
+    while tokens and changed:
+        changed = False
+
+        if tokens[0] in ("sh", "bash", "zsh") and "-c" in tokens:
+            try:
+                cidx = tokens.index("-c")
+                inner = tokens[cidx + 1] if cidx + 1 < len(tokens) else ""
+                wrapper_chain.append(tokens[0])
+                try:
+                    tokens = _tokenize_command(inner)
+                except Exception:
+                    tokens = inner.split()
+                changed = True
+                continue
+            except Exception:
+                pass
+
+        head = tokens[0]
+
+        if head in COMMAND_WRAPPERS:
+            wrapper_chain.append(head)
+            tokens = tokens[1:]
+            tokens = _strip_leading_option_values(tokens, head)
+            changed = True
+            continue
+
+        if head in ("proxychains", "proxychains4", "tsocks", "nohup", "setsid", "time", "unbuffer"):
+            wrapper_chain.append(head)
+            tokens = tokens[1:]
+            tokens = _strip_leading_option_values(tokens, head)
+            changed = True
+            continue
+
+        if head in ("command", "builtin") and len(tokens) > 1:
+            wrapper_chain.append(head)
+            tokens = tokens[1:]
+            changed = True
+            continue
+
+    base_token = tokens[0] if tokens else ""
+    return {
+        "original_tokens": original_tokens,
+        "peeled_tokens": tokens,
+        "base_token": base_token,
+        "wrapper_chain": wrapper_chain,
+    }
+
+
+def _tokenize_command(command_str: str) -> List[str]:
+    try:
+        return shlex.split(command_str)
+    except Exception:
+        return command_str.split()
+
+
+def _strip_leading_option_values(tokens: List[str], wrapper: str) -> List[str]:
+    if not tokens:
+        return tokens
+
+    out = list(tokens)
+
+    if wrapper == "env":
+        while out:
+            t = out[0]
+            if t.startswith("-"):
+                opt = out.pop(0)
+                if WRAPPER_VALUE_OPTS["env"].get(opt, 0) and out:
+                    out.pop(0)
+                continue
+            if "=" in t and not t.startswith(("ssh://", "http://", "https://")):
+                out.pop(0)
+                continue
+            break
+        return out
+
+    if wrapper == "timeout":
+        while out and out[0].startswith("-"):
+            opt = out.pop(0)
+            if WRAPPER_VALUE_OPTS["timeout"].get(opt, 0) and out:
+                out.pop(0)
+        if out and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", out[0]):
+            out.pop(0)
+        return out
+
+    while out and out[0].startswith("-"):
+        opt = out.pop(0)
+        if WRAPPER_VALUE_OPTS.get(wrapper, {}).get(opt, 0) and out:
+            out.pop(0)
+
+    return out
+
+
+def _should_use_branch(command_str: str) -> bool:
+    if not command_str:
+        return False
+
+    peeled = _peel_wrappers(command_str)
+    tokens = peeled["peeled_tokens"]
+    if not tokens:
+        return False
+
+    tok = tokens[0]
+
+    if tok in ("sh", "bash", "zsh") and "-c" in tokens:
+        try:
+            cidx = tokens.index("-c")
+            inner_cmd = tokens[cidx + 1] if cidx + 1 < len(tokens) else ""
+            inner = _tokenize_command(inner_cmd)
+            if inner:
+                tok = inner[0]
+        except Exception:
+            pass
+
+    if tok in INTERACTIVE_LAUNCHERS:
+        return True
+
+    if any(flag in tokens for flag in ("-i", "--interactive")):
+        return True
+
+    return False
+
+
+def _send_to_fd(fd: Optional[int], text: str) -> None:
+    if fd is None:
         raise RuntimeError("Shell is not initialized.")
 
     if text is None:
         text = ""
 
     if text == "":
-        os.write(_SHELL_FD, b"\n")
+        os.write(fd, b"\n")
         return
 
     for line in text.splitlines():
-        os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
+        os.write(fd, (line + "\n").encode("utf-8"))
 
 
-def _read_until_marker_or_idle(
+def _read_until_marker_or_idle_fd(
+    fd: Optional[int],
+    pid: Optional[int],
     marker: str,
     timeout: float = 0.2,
     stream: bool = True,
@@ -393,13 +691,7 @@ def _read_until_marker_or_idle(
     truncate_policy: Optional[dict] = None,
     tail_lines: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Read from PTY until marker is seen, or until the shell appears to wait for input
-    for INTERACTIVE_IDLE_SECONDS without marker progress.
-    """
-    global _SHELL_FD
-
-    if _SHELL_FD is None:
+    if fd is None:
         return {"output": "", "completed": False, "interactive_mode": False}
 
     chunks: List[str] = []
@@ -408,14 +700,29 @@ def _read_until_marker_or_idle(
     prompt_seen = False
 
     while True:
-        r, _, _ = select.select([_SHELL_FD], [], [], timeout)
+        r, _, _ = select.select([fd], [], [], timeout)
 
         if not r:
             idle_for = time.monotonic() - last_activity
 
-            # If no marker after a long idle period, assume the process is waiting
-            # for user input. This is the core interactive detection requested.
-            if _shell_alive() and idle_for >= INTERACTIVE_IDLE_SECONDS:
+            if prompt_seen and _shell_alive(pid) and idle_for >= INTERACTIVE_PROMPT_GRACE_SECONDS:
+                raw = "".join(chunks)
+                if marker in raw:
+                    raw = raw.split(marker)[0]
+
+                policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(raw)
+                nonempty = [ln for ln in raw.splitlines() if ln.strip() != ""]
+                should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(raw))
+                if should_trunc:
+                    raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
+
+                return {
+                    "output": _sanitize_output(raw, None, None),
+                    "completed": False,
+                    "interactive_mode": True,
+                }
+
+            if _shell_alive(pid) and idle_for >= INTERACTIVE_IDLE_SECONDS:
                 raw = "".join(chunks)
                 if marker in raw:
                     raw = raw.split(marker)[0]
@@ -435,7 +742,7 @@ def _read_until_marker_or_idle(
             continue
 
         try:
-            chunk = os.read(_SHELL_FD, 4096).decode("utf-8", errors="replace")
+            chunk = os.read(fd, 4096).decode("utf-8", errors="replace")
         except OSError:
             break
 
@@ -455,6 +762,7 @@ def _read_until_marker_or_idle(
                     to_print = chunk.split(marker)[0]
                 else:
                     to_print = chunk
+                to_print = re.sub(r"(?m)^__CMD_CWD_\d+__.*(?:\n|$)", "", to_print)
                 sys.stdout.write(to_print)
                 sys.stdout.flush()
             except Exception:
@@ -470,13 +778,20 @@ def _read_until_marker_or_idle(
             if should_trunc:
                 raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
 
+            if prompt_seen or _looks_like_interactive_prompt(raw):
+                return {
+                    "output": _sanitize_output(raw, None, None),
+                    "completed": False,
+                    "interactive_mode": True,
+                }
+
             return {
                 "output": _sanitize_output(raw, None, None),
                 "completed": True,
                 "interactive_mode": False,
             }
 
-        if not _shell_alive():
+        if not _shell_alive(pid):
             break
 
     raw = "".join(chunks)
@@ -505,30 +820,74 @@ def run_shell(
     truncate: bool = False,
     truncate_policy: Optional[dict] = None,
     tail_lines: Optional[int] = None,
+    cwd: Optional[str] = None,
 ):
-    """
-    Execute a shell command in a persistent pty-backed bash.
-
-    If output stalls for INTERACTIVE_IDLE_SECONDS and marker is not seen, return:
-        {
-            "output": "...partial output...",
-            "interactive_mode": True,
-            "completed": False
-        }
-
-    If _INTERACTIVE_MODE is already active, treat `command` as INPUT to the
-    currently running process and do not create a new marker.
-    """
-    global _COUNTER, _INTERACTIVE_MODE, _ACTIVE_MARKER
+    global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
 
     with _LOCK:
         _start_shell()
 
-        # If we are already in interactive mode, treat the incoming text as input
-        # to the live process, not a fresh command.
-        continuing_interactive = _INTERACTIVE_MODE and (_ACTIVE_MARKER is not None)
+        branch_alive = _shell_alive(_BRANCH_PID)
+        continuing_interactive = _INTERACTIVE_MODE and branch_alive and (_BRANCH_FD is not None)
 
-        # Keep old sudo handling behavior.
+        if continuing_interactive:
+            # User-requested branch termination keyword.
+            if isinstance(command, str) and command.strip().lower() == "done":
+                _reset_branch_shell()
+                _INTERACTIVE_MODE = False
+
+                return {
+                    "output": "[interactive branch terminated]",
+                    "interactive_mode": False,
+                    "completed": True,
+                    "branch_mode": False,
+                    "session_label": None,
+                    "cwd_raw": None,
+                    "cwd_display": None,
+                }
+            SPECIAL_KEYS = {
+                "SIGINT": b"\x03",
+                "EOF": b"\x04",
+                "SIGTSTP": b"\x1A",
+            }
+
+            if command in SPECIAL_KEYS:
+                os.write(_BRANCH_FD, SPECIAL_KEYS[command])
+            else:
+                _send_to_fd(_BRANCH_FD, command)
+
+            marker = _BRANCH_MARKER or "__BRANCH_DONE__"
+            read_result = _read_until_marker_or_idle_fd(
+                fd=_BRANCH_FD,
+                pid=_BRANCH_PID,
+                marker=marker,
+                timeout=timeout,
+                stream=stream,
+                truncate=truncate,
+                truncate_policy=truncate_policy,
+                tail_lines=tail_lines,
+            )
+
+            output = read_result["output"]
+            completed = bool(read_result["completed"])
+            interactive_mode = bool(read_result["interactive_mode"])
+
+            if completed:
+                _reset_branch_shell()
+                _INTERACTIVE_MODE = False
+            else:
+                _INTERACTIVE_MODE = True
+
+            return {
+                "output": output,
+                "interactive_mode": _INTERACTIVE_MODE,
+                "completed": completed,
+                "branch_mode": True,
+                "session_label": _BRANCH_SESSION_LABEL,
+                "cwd_raw": None,
+                "cwd_display": _decorate_cwd(cwd or _START_CWD, _BRANCH_SESSION_LABEL),
+            }
+
         if sudo:
             if sudo_password is None:
                 sudo_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
@@ -558,7 +917,6 @@ def run_shell(
 
             rest_command = " ".join(rest_tokens).strip()
 
-            # If we have a sudo password, keep existing non-interactive behavior.
             if sudo_password is not None:
                 try:
                     first_tok = tokens[0]
@@ -610,52 +968,113 @@ def run_shell(
                 policy = truncate_policy if truncate_policy is not None else _match_truncation_policy(command)
                 nonempty = [ln for ln in raw_out.splitlines() if ln.strip() != ""]
                 should_trunc = (truncate or policy is not None) and (len(nonempty) >= TRUNCATE_MIN_LINES) and (not _is_truncation_exempt(command))
-                if should_trunc:
-                    processed = _apply_truncation(raw_out, policy, tail_lines, force_tail=truncate)
-                else:
-                    processed = raw_out
+                processed = _apply_truncation(raw_out, policy, tail_lines, force_tail=truncate) if should_trunc else raw_out
 
                 return {
                     "output": _sanitize_output(processed, sudo_password, None),
                     "interactive_mode": False,
                     "completed": True,
+                    "branch_mode": False,
+                    "session_label": None,
+                    "cwd_raw": None,
+                    "cwd_display": None,
                 }
 
-            # If no sudo password is available, fall through to PTY path.
             escaped = _escape_single_quotes(rest_command)
             opt_str = (" " + " ".join(options)) if options else ""
             wrapped = f"sudo -n{opt_str} bash -c '{escaped}'"
-            _send_to_shell(wrapped)
+            _send_to_fd(_SHELL_FD, wrapped)
 
-        else:
-            if continuing_interactive:
-                # Feed INPUT to the existing live process.
-                SPECIAL_KEYS = {
-    "^C": b"\x03",  # SIGINT
-    "^D": b"\x04",  # EOF
-    "^Z": b"\x1A",  # SIGTSTP
-}           
-                if command in SPECIAL_KEYS:
-                    os.write(_SHELL_FD, SPECIAL_KEYS[command])
-                else:
-                    _send_to_shell(command)
+            marker = f"__CMD_DONE_{_COUNTER + 1}__"
+            _COUNTER += 1
+            os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
 
+            read_result = _read_until_marker_or_idle_fd(
+                fd=_SHELL_FD,
+                pid=_SHELL_PID,
+                marker=marker,
+                timeout=timeout,
+                stream=stream,
+                truncate=truncate,
+                truncate_policy=truncate_policy,
+                tail_lines=tail_lines,
+            )
+
+            output = read_result["output"]
+            completed = bool(read_result["completed"])
+            interactive_mode = bool(read_result["interactive_mode"])
+
+            if interactive_mode and not completed:
+                _INTERACTIVE_MODE = False
+
+            return {
+                "output": output,
+                "interactive_mode": interactive_mode,
+                "completed": completed,
+                "branch_mode": False,
+                "session_label": None,
+                "cwd_raw": None,
+                "cwd_display": None,
+            }
+
+        use_branch = _should_use_branch(command)
+
+        if use_branch:
+            branch_cwd = _undecorate_cwd(cwd) if cwd else _START_CWD
+            _start_branch_shell(branch_cwd)
+
+            for line in command.splitlines():
+                os.write(_BRANCH_FD, (line + "\n").encode("utf-8"))
+
+            os.write(_BRANCH_FD, f'printf "{_BRANCH_MARKER}\\n"\n'.encode("utf-8"))
+
+            read_result = _read_until_marker_or_idle_fd(
+                fd=_BRANCH_FD,
+                pid=_BRANCH_PID,
+                marker=_BRANCH_MARKER,
+                timeout=timeout,
+                stream=stream,
+                truncate=truncate,
+                truncate_policy=truncate_policy,
+                tail_lines=tail_lines,
+            )
+
+            output = read_result["output"]
+            completed = bool(read_result["completed"])
+            interactive_mode = bool(read_result["interactive_mode"])
+
+            branch_label = _branch_session_label(command, output)
+            _BRANCH_SESSION_LABEL = branch_label
+
+            if completed:
+                _reset_branch_shell()
+                _INTERACTIVE_MODE = False
             else:
-                _COUNTER += 1
-                marker = f"__CMD_DONE_{_COUNTER}__"
-                _ACTIVE_MARKER = marker
+                _INTERACTIVE_MODE = True
 
-                # Send command
-                for line in command.splitlines():
-                    os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
+            return {
+                "output": output,
+                "interactive_mode": _INTERACTIVE_MODE,
+                "completed": completed,
+                "branch_mode": True,
+                "session_label": branch_label,
+                "cwd_raw": branch_cwd,
+                "cwd_display": _decorate_cwd(branch_cwd, branch_label),
+            }
 
-                # Completion marker. If the command enters an interactive program,
-                # this marker will only be reached once that program exits.
-                os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
+        _COUNTER += 1
+        marker = f"__CMD_DONE_{_COUNTER}__"
+        cwd_marker = f"__CMD_CWD_{_COUNTER}__"
 
-        marker = _ACTIVE_MARKER if _ACTIVE_MARKER is not None else f"__CMD_DONE_{_COUNTER}__"
+        for line in command.splitlines():
+            os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
 
-        read_result = _read_until_marker_or_idle(
+        os.write(_SHELL_FD, f'printf "{cwd_marker}%s\\n" "$PWD"\n'.encode("utf-8"))
+        os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
+
+        read_result = _read_until_marker_or_idle_fd(
+            fd=_SHELL_FD,
+            pid=_SHELL_PID,
             marker=marker,
             timeout=timeout,
             stream=stream,
@@ -665,28 +1084,30 @@ def run_shell(
         )
 
         output = read_result["output"]
+        output, cwd_after = _extract_cwd_marker(output, cwd_marker)
         completed = bool(read_result["completed"])
         interactive_mode = bool(read_result["interactive_mode"])
 
         if completed:
             _INTERACTIVE_MODE = False
-            _ACTIVE_MARKER = None
         elif interactive_mode:
-            _INTERACTIVE_MODE = True
-            # Keep marker alive so later INPUT can continue the same session.
-        else:
-            if continuing_interactive:
-                _INTERACTIVE_MODE = True
+            _INTERACTIVE_MODE = False
 
         return {
             "output": output,
-            "interactive_mode": _INTERACTIVE_MODE,
+            "interactive_mode": interactive_mode,
             "completed": completed,
+            "branch_mode": False,
+            "session_label": None,
+            "cwd_raw": cwd_after if completed else None,
+            "cwd_display": None,
         }
 
 
 def shell_reset():
-    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _ACTIVE_MARKER
+    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
+
+    _reset_branch_shell()
 
     pid = _SHELL_PID
     fd = _SHELL_FD
@@ -694,7 +1115,7 @@ def shell_reset():
     _SHELL_PID = None
     _SHELL_FD = None
     _INTERACTIVE_MODE = False
-    _ACTIVE_MARKER = None
+    _BRANCH_SESSION_LABEL = None
 
     if pid is not None:
         try:
@@ -714,39 +1135,65 @@ def shell_reset():
             pass
 
 
-def shell(command, memory, local_state):
-    result = run_shell(command, stream=True, truncate=True)
+def shell(command, memory, local_state, program_state):
+    current_cwd = _undecorate_cwd(str(local_state.get("CURRENT_WORKING_DIRECTORY", "")).strip())
+
+    result = run_shell(command, stream=True, truncate=True, cwd=current_cwd)
 
     output = str(result.get("output", ""))
     interactive_mode = bool(result.get("interactive_mode", False))
     completed = bool(result.get("completed", True))
+    branch_mode = bool(result.get("branch_mode", False))
+    session_label = result.get("session_label") or None
+    cwd_raw = result.get("cwd_raw") or None
+    cwd_display = result.get("cwd_display") or None
 
-    # Track both input and output in state.
+    # Keep local_state minimal: only CURRENT_WORKING_DIRECTORY.
+    if branch_mode and interactive_mode:
+        if cwd_display:
+            local_state["CURRENT_WORKING_DIRECTORY"] = cwd_display
+        else:
+            label = session_label or _fallback_session_label(command)
+            base_cwd = cwd_raw or current_cwd or _START_CWD
+            local_state["CURRENT_WORKING_DIRECTORY"] = _decorate_cwd(base_cwd, label)
+    else:
+        # restore plain path in local_state
+        if cwd_raw:
+            local_state["CURRENT_WORKING_DIRECTORY"] = cwd_raw
+        elif cwd_display:
+            local_state["CURRENT_WORKING_DIRECTORY"] = _undecorate_cwd(cwd_display)
+        elif current_cwd:
+            local_state["CURRENT_WORKING_DIRECTORY"] = current_cwd
+        else:
+            local_state["CURRENT_WORKING_DIRECTORY"] = os.getcwd()
+
+    # Program state carries everything else.
     local_state["last_action"] = command
     local_state["last_tool_output"] = output
-    local_state["INTERACTIVE_MODE"] = "ON" if interactive_mode else "OFF"
-    local_state["INTERACTIVE_COMPLETED"] = completed
+    program_state["INTERACTIVE_MODE"] = "ON" if interactive_mode else "OFF"
+    program_state["INTERACTIVE_COMPLETED"] = completed
+    program_state["BRANCH_MODE"] = "ON" if branch_mode else "OFF"
+    program_state["ACTIVE_SESSION"] = "BRANCH" if branch_mode and interactive_mode else "MAIN"
 
-    # Only update cwd after a completed non-interactive command.
-    try:
-        if not interactive_mode and completed:
-            pwd_result = run_shell("pwd", stream=False, truncate=False)
-            if isinstance(pwd_result, dict):
-                pwd_out = str(pwd_result.get("output", ""))
-            else:
-                pwd_out = str(pwd_result)
+    if session_label:
+        program_state["SESSION_LABEL"] = session_label
+    elif branch_mode and interactive_mode:
+        program_state["SESSION_LABEL"] = _fallback_session_label(command)
 
-            lines = [ln.strip() for ln in pwd_out.splitlines() if ln.strip()]
-            if lines:
-                local_state["CURRENT_WORKING_DIRECTORY"] = lines[-1]
-    except Exception:
-        local_state["CURRENT_WORKING_DIRECTORY"] = local_state.get("CURRENT_WORKING_DIRECTORY", os.getcwd())
-
+    if branch_mode and interactive_mode:
+        program_state["BRANCH_WORKING_DIRECTORY"] = cwd_raw or _undecorate_cwd(local_state["CURRENT_WORKING_DIRECTORY"])
+        program_state["CURRENT_WORKING_DIRECTORY"] = local_state["CURRENT_WORKING_DIRECTORY"]
+    else:
+        program_state["BRANCH_WORKING_DIRECTORY"] = None
+        program_state["CURRENT_WORKING_DIRECTORY"] = local_state["CURRENT_WORKING_DIRECTORY"]
+    print(local_state["CURRENT_WORKING_DIRECTORY"])
     return {
         "ok": True,
         "output": output,
         "memory": memory,
         "state": local_state,
+        "program_state": program_state,
         "interactive_mode": interactive_mode,
         "completed": completed,
+        "branch_mode": branch_mode,
     }

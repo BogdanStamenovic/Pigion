@@ -1,4 +1,4 @@
-def memadd(command, memory, local_state):
+def memadd(command, memory, local_state, program_state):
     local_state=dict(local_state)  # Make a copy to avoid mutating the original
     existing_lines = [line for line in memory.splitlines() if line.strip()]
     if existing_lines and existing_lines[-1] == command:
@@ -20,4 +20,5 @@ def memadd(command, memory, local_state):
             "output": output,
             "memory": new_memory,
             "state": local_state,
+            "program_state": program_state,
         }

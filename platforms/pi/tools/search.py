@@ -131,7 +131,7 @@ def run_search(
             "input": query,
             "error": f"{type(e).__name__}: {e}",
         }
-def search(command, memory, local_state):
+def search(command, memory, local_state, program_state):
     local_state=dict(local_state)  # Make a copy to avoid mutating the original
     output = run_search(command)
     if output["ok"] == False and output["error"] == "DDGSException: No results found.":
@@ -154,6 +154,7 @@ def search(command, memory, local_state):
             "error": "DuckDuckGo search failed after multiple attempts due to rate-limiting.",
             "memory": memory,
             "state": local_state,
+            "program_state": program_state,
         }
     output = str(output)
     local_state["last_tool_output"] = output
@@ -163,4 +164,5 @@ def search(command, memory, local_state):
             "output": output,
             "memory": memory,
             "state": local_state,
+            "program_state": program_state,
     }

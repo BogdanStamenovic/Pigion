@@ -1,78 +1,64 @@
 # Pigion
 
-Pigion is a local autonomous-agent framework built around a bounded execution loop called Watchdog. The repository currently contains two platform-specific Watchdog runners:
+Pigion is an experimental local autonomous-agent framework. The active runner in this workspace is `pi/run_pi.py`, a Linux/Pi-oriented agent loop that uses Gemini for planning, action selection, evaluation, and recovery, then executes tool calls through Python modules in `pi/tools`.
 
-- `laptop/` for a Windows laptop environment using persistent PowerShell.
-- `pi/` for a Raspberry Pi or Linux environment using persistent Bash through a PTY.
+The agent is intentionally bounded: it creates a plan, works one plan step at a time, executes one tool action at a time, evaluates progress, attempts recovery on failures, and stops when the plan is complete or a configured limit is reached.
 
-Both runners share the same core architecture: create a high-level plan, execute one step at a time, call tools through text actions, evaluate each action, recover from failures when possible, and store useful failure/recovery patterns in a local JSONL experience database.
-
-The codebase is still experimental. Several modules are duplicated between `laptop` and `pi`. This README documents the project exactly as it exists now.
-
-## Repository Layout
+## Current Layout
 
 ```text
 Pigion/
   README.md
-  maker.py
+  TOOLDOCS.md
   requirements.txt
-  setup.ps1
   setup.sh
+  setup.ps1
+  maker.py
   file_sort_test copy.py
   agent_test_makers/
-    file_sort_test.py
-  platforms/
-    laptop/
-      tools/
-        askuser.py
-        memadd.py
-        return_value.py
-        search.py
-        shell.py
-    pi/
-      tools/
-        askuser.py
-        memadd.py
-        return_value.py
-        search.py
-        shell.py
   laptop/
     run_laptop.py
     exp/
-      td.txt
-      enving.txt
     tools/
-      askuser.py
-      memadd.py
-      return_value.py
-      search.py
-      shell.py
   pi/
     run_pi.py
     exp/
       td.txt
-      tool_import.txt
       enving.txt
+      exp.jsonl
     tools/
       askuser.py
       memadd.py
       return_value.py
       search.py
       shell.py
+  platforms/
+    core/
+    pi/
+    windows/
 ```
+
+`pi/` is the runner and tool package currently being developed. `laptop/` and `platforms/` still exist as older/generated templates and reference implementations, but they are not as current as `pi/run_pi.py`.
 
 ## Requirements
 
-Runtime dependencies are listed in `requirements.txt`:
+Runtime dependencies are in `requirements.txt`:
 
-- `google-genai`: Gemini API client used by the Watchdog runners.
-- `python-dotenv`: loads `.env` configuration.
-- `ddgs`: search and URL extraction tool.
-- `protobuf`: dependency used by the Google client stack.
+- `google-genai` for Gemini calls.
+- `python-dotenv` for `.env` loading.
+- `ddgs` for search and URL extraction.
+- `protobuf`, used by the Google client stack.
 
-Python 3 is required. The Windows setup script expects `python`; the Unix setup script expects `python3`.
+Python 3 is required.
 
-## Installation
+## Setup
+
+Linux/Pi:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
 
 Windows PowerShell:
 
@@ -80,258 +66,141 @@ Windows PowerShell:
 .\setup.ps1
 ```
 
-Linux or Raspberry Pi:
+The setup scripts can create `.venv`, install requirements, write `.env`, and populate `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
 
-```bash
-chmod +x setup.sh
-./setup.sh
-```
-
-Both scripts can create a `.venv`, install `requirements.txt`, write `.env` values, and write device environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
-
-## Environment Variables
-
-The runners use these environment variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `API_KEY` | none | Google GenAI API key. |
-| `ABS_PATH` | required | Absolute path to the project root. The runner appends `pi` or `laptop`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Gemini model used for planning, decisions, evaluation, and recovery. |
-| `LLM_TEMPERATURE` | `0.3` | Generation temperature. |
-| `MAX_OUTPUT_TOKENS` | `700` | Max tokens requested per model call. |
-| `MAX_ACTIONS_PER_STEP` | `12` | Max tool/action rounds per plan step. |
-| `MAX_LLM_RETRIES` | `6` | Max model-call retries. |
-| `MAX_RECOVERY_ATTEMPTS` | `6` | Max recovery attempts per step. |
-| `TOKENS_PER_GOAL` | `100000` | Approximate token budget for one goal. |
-| `EXP_DB_PATH` | `<ABS_PATH>/<device>/exp/exp.jsonl` | JSONL experience database path. |
-| `SIMILAR_FAILURES_TOP_K` | `5` | Number of similar past failures passed into recovery. |
-| `MAX_SHELL_OUTPUT` | `200000` | Linux shell output limit before truncation. |
-| `SHELL_TAIL_LINES` | `50` | Linux shell fallback tail length. |
-| `SHELL_TRUNCATE_MIN_LINES` | `20` | Linux shell minimum line count before truncation. |
-| `SUDO_PASSWORD` | none | Optional sudo password for Linux shell commands. |
-| `TEST_SUDO_PASSWORD` | none | Alternate optional sudo password name. |
-
-Example `.env`:
+At minimum, `.env` needs:
 
 ```env
 API_KEY="your-google-genai-key"
-ABS_PATH="C:\Users\helper\Desktop\Pigion"
-GEMINI_MODEL="gemini-2.5-flash-lite"
+ABS_PATH="/absolute/path/to/Pigion"
 ```
 
-For Linux/Pi:
+Optional Linux shell settings:
 
 ```env
-API_KEY="your-google-genai-key"
-ABS_PATH="/home/pi/Pigion"
 SUDO_PASSWORD=""
+GEMINI_MODEL="gemini-2.5-flash-lite"
+LLM_TEMPERATURE="0.3"
 ```
 
-## Running Watchdog
+## Running
 
-Laptop runner:
-
-```powershell
-python laptop\run_laptop.py
-```
-
-Pi/Linux runner:
+The Pi runner currently has a hard-coded demo goal at the bottom of `pi/run_pi.py`:
 
 ```bash
 python3 pi/run_pi.py
 ```
 
-Each runner currently has a hard-coded demo goal in its `if __name__ == "__main__"` block. To run a custom goal, import `run_agent`:
-
-```python
-from laptop.run_laptop import run_agent
-
-run_agent("Sort the files in the test folder into subfolders by type.")
-```
-
-or:
+To run your own goal from Python:
 
 ```python
 from pi.run_pi import run_agent
 
-run_agent("Inspect the current directory and summarize what files exist.")
+run_agent("Inspect the current directory and summarize the files.")
 ```
 
-## Creating New Instances
+## Runner Flow
 
-Use `maker.py` to generate another Watchdog instance package. The runner logic is copied from the shared Watchdog template and the generated runner gets its own `NAME` value, package folder, tools, and `exp` files.
+`pi/run_pi.py` follows this flow:
 
-Platform-specific tool templates live in the central `platforms/` folder:
-
-```text
-platforms/
-  laptop/
-    tools/
-  pi/
-    tools/
-```
-
-To add another platform, create `platforms/<platform-name>/tools` and put compatible tool modules inside it. `maker.py` discovers platform names from that folder.
-
-Interactive mode:
-
-```powershell
-python maker.py
-```
-
-Interactive mode asks for:
-
-- new instance name
-- platform template
-- tools to include
-- OS text for `exp/enving.txt`
-- terminal text for `exp/enving.txt`
-
-Non-interactive example:
-
-```powershell
-python maker.py lab_agent --platform laptop --tools shell,memadd,search,return,askuser --env-os "Windows 11 Pro" --env-terminal powershell
-```
-
-Pi/Linux-style shell tools:
-
-```bash
-python3 maker.py field_agent --platform pi --tools all --env-os "Raspberry Pi OS" --env-terminal bash
-```
-
-The maker currently discovers these built-in tool names from the selected `platforms/<platform>/tools` folder:
-
-- `shell`
-- `memadd`
-- `search`
-- `return`
-- `askuser`
-
-Generated layout:
-
-```text
-lab_agent/
-  __init__.py
-  run_lab_agent.py
-  exp/
-    td.txt
-    enving.txt
-    tool_import.txt
-  tools/
-    __init__.py
-    ...
-```
-
-Use `--force` to replace an existing generated instance directory with the same name.
-
-If `--env-os` or `--env-terminal` are omitted in a real interactive terminal, maker asks for them and shows detected defaults. If maker is run from a non-interactive pipe, it falls back to detected environment values.
-
-## Watchdog Execution Flow
-
-Watchdog follows this loop:
-
-1. Load `.env`, tool documentation, environment documentation, and dynamic tool modules.
-2. Initialize the Gemini client.
-3. Load the local experience database.
-4. Ask the model for a high-level plan with 3 to 7 steps.
+1. Load `.env`, `pi/exp/td.txt`, and `pi/exp/enving.txt`.
+2. Dynamically import tools described in `pi/exp/td.txt`.
+3. Optionally formalize the user goal.
+4. Create a 3 to 7 step high-level plan.
 5. Work through the plan one step at a time.
 6. Ask the model for exactly one next action.
-7. Execute that action through a tool module.
-8. Ask the model to evaluate the last action.
-9. If evaluation fails, classify the failure and run recovery.
-10. If recovery later succeeds, write a new experience entry.
-11. Stop when all steps finish or a hard limit is reached.
+7. Dispatch the action to a tool.
+8. Evaluate the action.
+9. If a tool enters interactive mode, run `start_interactive_mode()` and then evaluate all plan steps with `evaluate_action_interactive()`.
+10. On failure, classify the error, search similar past failures in `pi/exp/exp.jsonl`, and ask for a recovery decision.
+11. Continue until all steps are done or a limit is reached.
 
-The agent is intentionally bounded. It does not run forever: every goal has action, retry, recovery, and approximate token limits.
+## Important Runtime State
 
-## Tool Action Format
+`agent_state` is model-visible runtime state. It includes values such as:
 
-The model is expected to choose actions as plain strings with a prefix:
+- `memory`
+- `MEMORYVALS`
+- `last_action`
+- `last_tool_output`
+- `pending_failure`
+- `last_similar_failures`
+- `CURRENT_WORKING_DIRECTORY`
 
-| Prefix | Meaning |
+`program_state` is internal loop/tool metadata. It is passed to tools but is not included in the normal system prompt. Current uses include:
+
+- `force_next_action`
+- `exp_cache_loaded`
+- `original_goal`
+- `formalized_goal`
+- `INTERACTIVE_MODE`
+- `BRANCH_MODE`
+- `SESSION_LABEL`
+- `plan_status`
+
+The interactive plan status map is intentionally kept in `program_state` so the loop can use it without showing that raw bookkeeping back to the agent.
+
+## Tool Actions
+
+The model chooses actions as strings:
+
+| Action | Meaning |
 | --- | --- |
-| `shell:COMMAND` | Execute a shell command. |
+| `shell:COMMAND` | Run a shell command through `pi/tools/shell.py`. |
 | `search:QUERY_OR_URL` | Search the web or extract text from a URL. |
-| `memadd:TEXT` | Add text to temporary memory. |
-| `memadd:KEY=VALUE` | Store a key/value in `MEMORYVALS`. |
-| `askuser:QUESTION` | Ask the user for input. |
-| `return:TEXT` | Append text to final returned output. |
+| `memadd:TEXT` | Append temporary memory. |
+| `memadd:KEY=VALUE` | Store a runtime key/value in `MEMORYVALS`. |
+| `askuser:QUESTION` | Intended user-input tool. Currently rough in the Pi tool package. |
+| `return:TEXT` | Append text to final returned output. Handled directly by `run_tool()`. |
 
-The runners dynamically import tools by reading `exp/td.txt`. The parser extracts tool names from each line's `Command - <tool>:...` section. `return` is mapped to the module name `return_value`.
+Tool documentation lives in `pi/exp/td.txt`. `tool_import()` parses that file and imports the command prefixes it finds in the `Command - prefix:...` field. `return` maps to the module name `return_value`.
 
-## Main Runner Modules
+See `TOOLDOCS.md` for the tool contract and how to add new tools.
 
-### `laptop/run_laptop.py`
+## Current Pi Tools
 
-Windows Watchdog runner. It sets `NAME = "laptop"` and imports tools from `laptop.tools`.
+### `shell`
 
-Responsibilities:
+`pi/tools/shell.py` is the main execution tool. It maintains a persistent Bash PTY for regular commands and a separate branch PTY for interactive programs such as `ssh`, `sftp`, shells, REPLs, editors, and terminal programs.
 
-- Loads environment values with `python-dotenv`.
-- Builds `ABS_PATH` as `os.path.join(os.getenv("ABS_PATH"), "laptop")`.
-- Reads `laptop/exp/td.txt` and `laptop/exp/enving.txt`.
-- Dynamically imports tool modules.
-- Creates and owns the Gemini client.
-- Builds strict JSON prompts for planning, action choice, action evaluation, and recovery.
-- Tracks temporary memory, state, action history, completed steps, pending failures, and token estimates.
-- Stores and retrieves failure/recovery examples through `ExpStore`.
-- Runs a hard-bounded action loop for each plan step.
+Highlights:
 
-Notable current details:
+- Starts `/bin/bash --noprofile --norc -i` through `pty.fork()`.
+- Disables prompt and echo noise where possible.
+- Tracks `CURRENT_WORKING_DIRECTORY`.
+- Supports sudo through `SUDO_PASSWORD` or `TEST_SUDO_PASSWORD`.
+- Truncates or filters verbose output for commands such as `apt` and `nmap`.
+- Detects interactive prompts and returns `interactive_mode: True`.
+- Uses branch session labels such as `sftp_interactive` or `@host`.
+- Keeps branch labels stable while interactive input is being sent.
 
-- The script prints raw model output for debugging.
-- Token accounting is approximate: `len(prompt) // 4 + MAX_OUTPUT_TOKENS`.
-- The main block contains a hard-coded Windows demo task that creates and opens a text file.
-- The decision prompt contains `CURRENT STEP:s`, which looks like a typo but is harmless text in the prompt.
+### `search`
 
-### `pi/run_pi.py`
+`pi/tools/search.py` uses `ddgs` to search text queries or extract page text from URLs. It returns a stringified result object and updates `last_tool_output`.
 
-Linux/Pi Watchdog runner. It sets `NAME = "pi"` and imports tools from `pi.tools`.
+Search requires network access and can be rate-limited.
 
-It has the same core responsibilities as `laptop/run_laptop.py`, with these differences:
+### `memadd`
 
-- Reads from `pi/exp/td.txt` and `pi/exp/enving.txt`.
-- Imports tools from `pi.tools`.
-- Includes `MEMORY VALUES` in the system prompt when `MEMORY_VALS` is populated.
-- The main block contains a hard-coded demo goal: `use askuser.`
-- The shell tool is Linux-specific and supports sudo handling.
+`pi/tools/memadd.py` stores temporary context.
 
-## Shared Runner Functions
+- Plain text is appended to the in-memory `memory` string.
+- `KEY=VALUE` writes into `local_state["MEMORYVALS"]`.
+- Duplicate last-line memory writes are ignored.
 
-Both runners define the same major functions and classes:
+Memory is runtime-local unless another caller persists it.
 
-| Name | Purpose |
-| --- | --- |
-| `tool_import()` | Reads `exp/td.txt`, extracts tool prefixes, imports matching modules, and returns callable tools. |
-| `load_tool_docs()` | Loads tool documentation text for prompt context. |
-| `load_env()` | Loads environment description text for prompt context. |
-| `count_tokens()` | Estimates tokens by character length. |
-| `safe_json()` | Serializes objects as formatted JSON for prompts. |
-| `extract_json()` | Parses model output as JSON, with fallback extraction from surrounding text. |
-| `_tokenize()` | Tokenizes text for sparse similarity. |
-| `_vectorize()` | Builds sparse token-count vectors. |
-| `_cosine_sparse()` | Computes cosine similarity between sparse vectors. |
-| `ExpStore` | Loads, appends, and searches JSONL experience entries. |
-| `infer_failure_name()` | Maps errors into stable failure categories. |
-| `init_client()` | Creates a Google GenAI client. |
-| `trim_history()` | Keeps only recent action history for prompts. |
-| `build_system_prompt()` | Creates the main prompt context and execution rules. |
-| `call_llm()` | Calls Gemini with retry handling and JSON parsing. |
-| `create_plan()` | Requests a 3 to 7 step plan. |
-| `decide_next_action()` | Requests exactly one next action for the current step. |
-| `evaluate_action()` | Evaluates the last action against the current step. |
-| `recover_step()` | Asks the model how to recover from a failure. |
-| `run_tool()` | Dispatches `return:` internally or calls a dynamically imported tool. |
-| `build_pending_failure()` | Creates a structured failure record. |
-| `finalize_experience_if_needed()` | Writes a useful recovery to the experience DB after success. |
-| `recover_from_failure()` | Combines failure classification, similar failure lookup, and recovery prompting. |
-| `apply_recovery_decision()` | Applies retry, step replacement, skip, or abort decisions. |
-| `run_agent()` | Main execution loop. |
+### `return`
+
+`return:TEXT` is handled directly in `run_tool()`, not normally by `pi/tools/return_value.py`. It appends `TEXT` to the global `returned_output`.
+
+### `askuser`
+
+`pi/tools/askuser.py` currently reads raw characters forever and does not return the standard tool result shape. It is not compatible with the current Pi runner contract without changes.
 
 ## Experience Store
 
-`ExpStore` stores failure/recovery examples as JSONL entries. Each entry contains:
+`ExpStore` stores failure and recovery examples in JSONL. Each entry looks like:
 
 ```json
 {
@@ -345,287 +214,43 @@ Both runners define the same major functions and classes:
 }
 ```
 
-Similarity is local and simple: text from `name`, `reason`, `step`, and `failed_action` is tokenized into sparse vectors, then compared with cosine similarity. The recovery prompt receives the top matching entries.
-
-## Failure Categories
-
-`infer_failure_name()` can classify failures as:
-
-- `permission_denied`
-- `repository_not_found`
-- `module_not_found`
-- `path_not_found`
-- `tool_timeout`
-- `rate_limited`
-- `json_parse_failed`
-- `dependency_install_failed`
-- `shell_command_failed`
-- `search_failed`
-- `memory_write_failed`
-- `generic_step_failure`
-
-## Tool Modules
-
-The central template copies live under `platforms/laptop/tools` and `platforms/pi/tools`. The existing `laptop/tools` and `pi/tools` folders are the tools used by those two checked-in instances.
-
-### `platforms/laptop/tools/shell.py` and `laptop/tools/shell.py`
-
-Persistent PowerShell wrapper for Windows.
-
-Key parts:
-
-- `_start_persistent_powershell()` starts `powershell -NoLogo -NoProfile -NoExit -Command -`.
-- It initializes console input/output encoding to UTF-8.
-- `run_shell(command)` base64-encodes the command, decodes it inside PowerShell, runs it with `Invoke-Expression`, and waits for a unique completion marker.
-- `shell(command, memory, local_state)` executes a command, updates `CURRENT_WORKING_DIRECTORY` by running `pwd`, stores `last_tool_output`, and returns the standard tool result dict.
-- `shell_reset()` exits and terminates the persistent PowerShell process.
-
-Returned shape:
-
-```python
-{
-    "ok": True,
-    "output": output,
-    "memory": memory,
-    "state": local_state,
-}
-```
-
-### `platforms/pi/tools/shell.py` and `pi/tools/shell.py`
-
-Persistent Bash wrapper for Linux/Pi.
-
-Key parts:
-
-- Starts an interactive `/bin/bash --noprofile --norc -i` through `pty.fork()`.
-- Disables prompt and command echoing.
-- Maintains shell process state across commands.
-- Supports sudo commands with either non-interactive `sudo -n` or password-backed `sudo -S`.
-- Loads `SUDO_PASSWORD` or `TEST_SUDO_PASSWORD` from environment or `.env`.
-- Sanitizes ANSI sequences, sudo prompts, echoed passwords, and common command noise.
-- Applies command-output truncation policies for verbose commands like `nmap`, `apt`, and `apt-get`.
-- Updates `CURRENT_WORKING_DIRECTORY` by running `pwd`.
-- `shell_reset()` kills and cleans up the persistent shell process.
-
-Important: storing sudo passwords in `.env` is convenient but sensitive. Prefer passwordless sudo for narrowly scoped commands or another safer secret-management approach.
-
-### `platforms/*/tools/search.py`, `laptop/tools/search.py`, and `pi/tools/search.py`
-
-Search and URL extraction tool using `ddgs`. The laptop and Pi versions are mirrored.
-
-Functions:
-
-- `_coerce_input(payload)` accepts a string, `{"search": "..."}`, or interactive input.
-- `_is_url(value)` detects `http` and `https` URLs.
-- `run_search(payload, max_results=7, max_chars=3000, region="us-en")` either extracts URL text or performs Bing-backed text search through `ddgs`.
-- `search(command, memory, local_state)` wraps `run_search()` in the standard tool result shape.
-
-Modes:
-
-- Query mode returns normalized results with `rank`, `title`, `url`, and `snippet`.
-- URL mode returns extracted page text, truncated to `max_chars`.
-
-If a search receives a specific DDGS no-results error, the wrapper retries up to 5 times with 5-second sleeps. It also prints search output to stdout before returning.
-
-### `platforms/*/tools/memadd.py`, `laptop/tools/memadd.py`, and `pi/tools/memadd.py`
-
-Temporary memory tool.
-
-Behavior:
-
-- Copies `local_state`.
-- If the last non-empty memory line already equals the command, it returns `MEMORY_ALREADY_ENDED_WITH_SAME_command`.
-- If the command contains `=`, it splits on the first `=` and writes `local_state["MEMORYVALS"][key] = val`.
-- Otherwise, it appends the command to the plain memory string.
-- Updates `last_tool_output`.
-
-The memory string is session-local and is not persisted to disk. `MEMORYVALS` lives in runtime state.
-
-### `platforms/laptop/tools/askuser.py` and `laptop/tools/askuser.py`
-
-Interactive user-input tool for the laptop runner.
-
-Behavior:
-
-- Calls `input(command)`.
-- Stores the answer in `last_tool_output`.
-- Returns the answer as `output`.
-
-### `platforms/pi/tools/askuser.py` and `pi/tools/askuser.py`
-
-Experimental raw-character input tool.
-
-Behavior:
-
-- Prints `READING RAW CHARACTERS`.
-- Reads one character at a time from `sys.stdin`.
-- Prints each character representation.
-
-Current limitation: it never returns a standard tool result and loops forever unless interrupted. It is not yet compatible with the runner's expected tool contract.
-
-### `platforms/*/tools/return_value.py`, `laptop/tools/return_value.py`, and `pi/tools/return_value.py`
-
-Simple helper module:
-
-```python
-def return_value(aha):
-    return aha
-```
-
-The runners do not normally dispatch `return:` through this module. They handle `return:` directly inside `run_tool()` by appending text to the global `returned_output`.
-
-## `exp` Files
-
-### `laptop/exp/td.txt` and `pi/exp/td.txt`
-
-Tool documentation injected into the system prompt. These files also indirectly control dynamic imports because `tool_import()` parses command prefixes from them.
-
-Current documented tools:
-
-- Shell
-- Memory
-- Search
-- Return
-- AskUser
-
-The parser assumes each line contains a comma-separated third field like:
-
-```text
-Command - shell:COMMAND
-```
-
-If this format changes, dynamic tool import may break.
-
-### `laptop/exp/enving.txt`
-
-Current laptop environment description:
-
-```text
-OS: Microsoft Windows 10 Pro
-TERMINAL: powershell
-```
-
-### `pi/exp/enving.txt`
-
-Current Pi/Linux environment description:
-
-```text
-OS: Kali GNU/Linux Rolling
-TERMINAL: zsh
-```
-
-### `pi/exp/tool_import.txt`
-
-Contains:
-
-```text
-shell search
-```
-
-Current runners do not read this file. Tool importing is based on `exp/td.txt`.
-
-### `exp/exp.jsonl`
-
-This file may be created at runtime by `ExpStore`. It is not present until the agent writes experience entries.
-
-## Test / Demo Scripts
-
-### `agent_test_makers/file_sort_test.py`
-
-Creates a `test/` folder with sample files:
-
-- `readme.txt`
-- `data.json`
-- `script.py`
-- `notes.md`
-- `config.ini`
-- `index.html`
-
-Then imports `run_agent` from `laptop.run_laptop` and asks the agent to sort those files into subfolders by type.
-
-Run on Windows:
-
-```powershell
-python agent_test_makers\file_sort_test.py
-```
-
-### `file_sort_test copy.py`
-
-Same concept as the laptop test script, but imports `run_agent` from `pi.run_pi`.
-
-Run on Linux/Pi:
-
-```bash
-python3 "file_sort_test copy.py"
-```
-
-## Setup Scripts
-
-### `setup.ps1`
-
-PowerShell setup script.
-
-It:
-
-- Verifies Python and pip.
-- Optionally creates `.venv`.
-- Installs `requirements.txt`.
-- Prompts for `API_KEY`.
-- Writes or updates `.env` with `API_KEY` and `ABS_PATH`.
-- Asks whether the current device is `pi` or `laptop`.
-- Detects current OS and terminal.
-- Prompts for the other device's OS and terminal.
-- Writes environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
-
-### `setup.sh`
-
-Unix setup script.
-
-It:
-
-- Verifies `python3` and pip.
-- Optionally creates `.venv`.
-- Installs `requirements.txt`.
-- Prompts for `API_KEY`.
-- Writes or updates `.env` with `API_KEY` and `ABS_PATH`.
-- Optionally stores `SUDO_PASSWORD`.
-- Sets `.env` permissions to `600`.
-- Asks whether the current device is `pi` or `laptop`.
-- Detects OS and terminal.
-- Prompts for the other device's OS and terminal.
-- Writes environment descriptions to `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
+Similarity is local and simple: fields are tokenized into sparse vectors and compared with cosine similarity. Recovery receives the closest matches.
+
+## Key Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `API_KEY` | none | Google GenAI API key. |
+| `ABS_PATH` | required | Project root. The runner appends `pi`. |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Model used for runner prompts. |
+| `LLM_TEMPERATURE` | `0.3` | Generation temperature. |
+| `MAX_OUTPUT_TOKENS` | `700` | Max model output tokens per call. |
+| `MAX_ACTIONS_PER_STEP` | `12` | Action rounds per plan step. |
+| `MAX_LLM_RETRIES` | `6` | Model-call retry limit. |
+| `MAX_RECOVERY_ATTEMPTS` | `6` | Recovery retry/replacement limit. |
+| `TOKENS_PER_GOAL` | `100000` | Approximate token budget per goal. |
+| `EXP_DB_PATH` | `<ABS_PATH>/pi/exp/exp.jsonl` | Experience DB path. |
+| `SIMILAR_FAILURES_TOP_K` | `5` | Similar failures passed to recovery. |
+| `USE_GOAL_FORMALIZER` | `True` | Whether to rewrite goals before planning. |
+| `MAX_SHELL_OUTPUT` | `200000` | Shell output size before truncation. |
+| `SHELL_TAIL_LINES` | `50` | Fallback tail line count. |
+| `SHELL_TRUNCATE_MIN_LINES` | `20` | Minimum line count before truncation. |
+| `SHELL_INTERACTIVE_IDLE_SECONDS` | `30` | Idle wait for interactive branch reads. |
+| `SHELL_INTERACTIVE_PROMPT_GRACE_SECONDS` | `0.5` | Prompt grace wait. |
+| `SUDO_PASSWORD` | none | Optional sudo password. |
+| `TEST_SUDO_PASSWORD` | none | Alternate sudo password variable. |
 
 ## Known Rough Edges
 
-- The existing code contains mojibake in debug strings and the old README had encoding damage.
-- `laptop/run_laptop.py` and `pi/run_pi.py` are mostly duplicated instead of sharing a common core.
-- Both runners require `ABS_PATH`; if it is missing, `os.path.join(os.getenv("ABS_PATH"), NAME)` will fail.
-- `tool_import()` error text mentions `tool_import.txt`, but the actual parser reads `exp/td.txt`.
-- `return_value.py` does not match the standard tool-call signature and is usually bypassed by `run_tool()`.
-- `pi/tools/askuser.py` does not return and can block forever.
-- Search requires network access and may be rate limited.
-- Shell tools are powerful and can modify the host system.
+- `pi/run_pi.py` and `laptop/run_laptop.py` are duplicated instead of sharing a core.
+- `ABS_PATH` is required; missing it will break path construction.
+- `tool_import()` error text mentions `tool_import.txt`, but current imports are based on `exp/td.txt`.
+- `pi/tools/askuser.py` does not satisfy the current standard tool contract.
+- `pi/tools/search.py` has one retry path that can return without `program_state` on success.
+- The runner prints raw model output and internal state for debugging.
+- The main runner still uses a hard-coded demo goal.
+- The shell tool is powerful and can modify the host system.
 
-## Roadmap Ideas
+## Safety
 
-Near-term cleanup:
-
-- Extract shared Watchdog logic into one reusable core module.
-- Keep only platform-specific shell behavior in platform packages.
-- Fix setup paths to write into `pi/exp` and `laptop/exp`.
-- Make all tools follow the same `(command, memory, local_state) -> dict` contract.
-- Replace hard-coded demo goals with CLI arguments.
-- Add tests for JSON extraction, experience retrieval, tool import parsing, and memory behavior.
-- Add safer shell command policies before using the agent on important machines.
-
-Longer-term architecture from the original project direction:
-
-- Watchdog: bounded execution agent.
-- Cleaner: maintenance for the experience database.
-- Cogmet: post-task evaluation and health scoring.
-- Bossman: external failsafe and rollback layer.
-- Mutormentor: controlled prompt/config mutation and evaluation.
-
-## Safety Notes
-
-Pigion can execute shell commands chosen by an LLM. Run it only in an environment where that is acceptable. Prefer a dedicated machine, VM, or container. Keep backups of important files. Avoid giving broad sudo access unless the machine is intentionally dedicated to this agent.
+Pigion can execute shell commands chosen by an LLM. Run it only on a machine, VM, or container where that is acceptable. Keep backups of important files, be careful with sudo, and treat `.env` as sensitive if it contains credentials.
