@@ -83,7 +83,7 @@ Write-Output "{marker}"
 
     return "".join(output_lines).rstrip()
 
-def shell(command: str, memory: str, local_state: dict) -> dict:
+def shell(command: str, memory: str, local_state: dict, program_state: dict) -> dict:
     local_state = dict(local_state)  # Make a copy to avoid mutating the original
     if "sudo" in command:
             output = str(run_shell(command))
@@ -109,6 +109,7 @@ def shell(command: str, memory: str, local_state: dict) -> dict:
             "output": output,
             "memory": memory,
             "state": local_state,
+            "program_state": program_state,
         }
 
 def shell_reset():

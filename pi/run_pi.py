@@ -592,7 +592,6 @@ Return ONLY:
 }}
 
 RULES:
-- AVOID unnecessary complexity.
 - Work ONLY on the CURRENT STEP.
 - Do NOT perform future steps early.
 - If CURRENT STEP is already complete, return status "done" and next_action "".
@@ -887,8 +886,8 @@ You MUST always respond in valid JSON.
 GLOBAL GOAL:
 {goal}
 
-CURRENT STEP:
-{current_step}
+PLAN FRAMEWORK:
+{safe_json(plan)}
 
 RUNTIME STATE:
 {safe_json(state)}
@@ -897,8 +896,8 @@ RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
 RULES:
--Work ONLY on the CURRENT STEP.
--When CURRENT STEP is complete, exit interactive mode by typing done.
+-Do as much as you can in THIS INTERACTIVE MODE session for the PLAN in ORDER.
+-When YOU DID AS MUCH AS YOU CAN, exit interactive mode by typing 'done'.
 """
         prompt = f"""
 INTERACTIVE MODE active for tool: {tool}
@@ -1505,7 +1504,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent( 
-            "sshpass into bodas@pigion with the password Dobrica111, while inside the server make a file called hi.txt in which you will save the word 'secret' and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
+            "sshpass into bodas@pigion with the password Dobrica111, while inside the server make a file called hi.txt in which you will save the temperature of the device and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
     finally:
         try:
             client.close()
