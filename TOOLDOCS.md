@@ -1,6 +1,6 @@
 # Tool Authoring Guide
 
-This file documents how tools work in the current Pi runner, `pi/run_pi.py`, and how to add new tools that behave correctly in the agent loop.
+This file documents how tools work in the current Pi runner, `pi/run_pi.py`, and how to add tools that behave correctly in the agent loop.
 
 ## Tool Discovery
 
@@ -15,7 +15,7 @@ That file serves two purposes:
 1. It is injected into the model prompt as the list of available tools.
 2. It is parsed by `tool_import()` to decide which Python modules to import.
 
-Each tool line should contain a comma-separated field like:
+Each tool line must contain a comma-separated command field in the third position:
 
 ```text
 Command - toolname:ARGUMENT
@@ -27,13 +27,15 @@ Example:
 6.FileRead, Description: Reads a local text file, Command - fileread:PATH, Example - fileread:README.md
 ```
 
-For that line, the runner will import:
+For that line, the runner imports:
 
 ```python
 from pi.tools.fileread import fileread
 ```
 
-Special case: `return` maps to the module name `return_value`, but `return:TEXT` is normally handled directly by `run_tool()`.
+The parser is currently brittle: avoid extra commas before the `Command - ...` field, and keep the command prefix identical to the Python function name.
+
+Special case: `return` maps to the module name `return_value` during import, but `return:TEXT` is normally handled directly by `run_tool()`.
 
 ## Required Tool File Shape
 
@@ -102,6 +104,15 @@ Failure example:
 ```
 
 The runner mostly reasons over `output`, `state`, `memory`, and `program_state`. If a failure is returned as data instead of an exception, include enough detail in `output` for the evaluator to understand it.
+
+## Directly Handled Actions
+
+Some actions are intercepted in `run_tool()` before dynamic dispatch:
+
+- `return:TEXT` appends to the global `returned_output`.
+- `askuser:QUESTION` calls Python `input()` and returns the answer.
+
+Because of that, `pi/tools/return_value.py` and `pi/tools/askuser.py` are compatibility/stale files rather than examples of the current tool contract. A new tool should follow the standard signature and return shape above.
 
 ## State Rules
 
@@ -175,6 +186,9 @@ Current `memadd` behavior:
 
 - `memadd:note text` appends to the memory string.
 - `memadd:key=value` updates `local_state["MEMORYVALS"][key]`.
+- Duplicate last-line plain-text memory writes are ignored.
+
+There is no source `memget` tool in the current `pi/tools` directory. If retrieval or embedded substitution is added later, implement it in `run_tool()` before dispatch so it works inside any tool input, and add the matching model-facing instructions to `pi/exp/td.txt`.
 
 The runner does not persist `memory` to disk by default.
 
@@ -241,7 +255,7 @@ An interactive-capable tool needs these pieces:
 - A prompt/idle detector for deciding when to return control to the agent.
 - A cleanup path.
 
-For shell-like tools, do not derive a new label from every interactive input. If the launch command is `sftp bodas@pigion`, the branch should keep a label such as `sftp_interactive` for the whole branch. Passwords, `echo`, `put`, `get`, and other input lines should not create labels like `password_interactive` or `echo_interactive`.
+For shell-like tools, do not derive a new label from every interactive input. If the launch command is `sftp user@host`, the branch should keep a label such as `sftp_interactive` for the whole branch. Passwords, `echo`, `put`, `get`, and other input lines should not create labels like `password_interactive` or `echo_interactive`.
 
 ## Current Shell Interactive Design
 
@@ -268,7 +282,7 @@ Launch flow:
 2. `_start_branch_shell(cwd)` creates a branch PTY.
 3. The command is sent to the branch.
 4. `_read_until_marker_or_idle_fd()` reads until completion, prompt, or idle.
-5. `_branch_session_label()` chooses a stable label such as `sftp_interactive` or `@pigion`.
+5. `_branch_session_label()` chooses a stable label such as `sftp_interactive` or `@host`.
 6. The tool returns `interactive_mode: True` when the branch is still active.
 
 Continuation flow:
@@ -372,6 +386,7 @@ Before adding a tool:
 - Use `program_state` for internal metadata.
 - Add a `Command - toolname:...` entry to `pi/exp/td.txt`.
 - Keep the `td.txt` command prefix identical to the function name.
+- Keep the `Command - ...` field as the third comma-separated field.
 - Run `python3 -m py_compile pi/tools/<toolname>.py pi/run_pi.py`.
 
 For interactive tools:
@@ -382,9 +397,14 @@ For interactive tools:
 - Return `interactive_mode: False` and `completed: True` when done.
 - Provide a cleanup/reset path.
 
+## ShadowFS TODO
+
+ShadowFS is not implemented yet. The intended core-runtime direction is to stage agent file operations in a shadow filesystem layer, expose diffs or pending writes for inspection, and commit or discard those changes explicitly. This should live in the shared core runtime rather than only inside `pi/tools/shell.py`, because shell execution, file tools, recovery, and future platform runners all need the same file-mutation boundary.
+
 ## Current Tool Compatibility Notes
 
 - `shell`, `memadd`, and the normal path of `search` follow the current `program_state`-aware contract.
-- `return` is handled by `run_tool()` before dynamic dispatch.
-- `return_value.py` does not use the standard signature and is mostly a compatibility stub.
-- `askuser.py` currently does not return and needs to be rewritten before it can be safely used by the current Pi runner.
+- `askuser:` is handled directly by `run_tool()`, but `pi/tools/askuser.py` itself is stale.
+- `return:` is handled directly by `run_tool()`, while `return_value.py` is mostly a compatibility stub.
+- `search` has one retry-success path that returns without `program_state`.
+- `memget` is not currently available as a source tool, despite stale bytecode possibly existing in `pi/tools/__pycache__`.

@@ -1,8 +1,8 @@
 # Pigion
 
-Pigion is an experimental local autonomous-agent framework. The active runner in this workspace is `pi/run_pi.py`, a Linux/Pi-oriented agent loop that uses Gemini for planning, action selection, evaluation, and recovery, then executes tool calls through Python modules in `pi/tools`.
+Pigion is an experimental local autonomous-agent framework. The active runner in this workspace is `pi/run_pi.py`, a Linux/Pi-oriented loop that uses Gemini for goal formalization, planning, action selection, action evaluation, interactive-session evaluation, and failure recovery. Tool calls are executed through Python modules in `pi/tools`.
 
-The agent is intentionally bounded: it creates a plan, works one plan step at a time, executes one tool action at a time, evaluates progress, attempts recovery on failures, and stops when the plan is complete or a configured limit is reached.
+The current runner is intentionally bounded: it creates a plan, works one plan step at a time, executes one tool action at a time, evaluates progress, attempts recovery on failures, and stops when the plan is complete or a configured limit is reached.
 
 ## Current Layout
 
@@ -15,6 +15,7 @@ Pigion/
   setup.ps1
   maker.py
   file_sort_test copy.py
+  test.py
   agent_test_makers/
   laptop/
     run_laptop.py
@@ -32,13 +33,16 @@ Pigion/
       return_value.py
       search.py
       shell.py
+  pi_exp/
+    exp.jsonl
   platforms/
     core/
+      whatchdog.py
     pi/
     windows/
 ```
 
-`pi/` is the runner and tool package currently being developed. `laptop/` and `platforms/` still exist as older/generated templates and reference implementations, but they are not as current as `pi/run_pi.py`.
+`pi/` is the active runtime and tool package. `laptop/` and `platforms/` are older/generated platform snapshots and reference implementations; they are useful for comparison, but `pi/run_pi.py` is the current development target.
 
 ## Requirements
 
@@ -75,17 +79,18 @@ API_KEY="your-google-genai-key"
 ABS_PATH="/absolute/path/to/Pigion"
 ```
 
-Optional Linux shell settings:
+Optional runtime settings:
 
 ```env
 SUDO_PASSWORD=""
+TEST_SUDO_PASSWORD=""
 GEMINI_MODEL="gemini-2.5-flash-lite"
 LLM_TEMPERATURE="0.3"
 ```
 
 ## Running
 
-The Pi runner currently has a hard-coded demo goal at the bottom of `pi/run_pi.py`:
+The Pi runner still has a hard-coded demo goal at the bottom of `pi/run_pi.py`:
 
 ```bash
 python3 pi/run_pi.py
@@ -101,7 +106,7 @@ run_agent("Inspect the current directory and summarize the files.")
 
 ## Runner Flow
 
-`pi/run_pi.py` follows this flow:
+`pi/run_pi.py` currently follows this flow:
 
 1. Load `.env`, `pi/exp/td.txt`, and `pi/exp/enving.txt`.
 2. Dynamically import tools described in `pi/exp/td.txt`.
@@ -109,11 +114,13 @@ run_agent("Inspect the current directory and summarize the files.")
 4. Create a 3 to 7 step high-level plan.
 5. Work through the plan one step at a time.
 6. Ask the model for exactly one next action.
-7. Dispatch the action to a tool.
-8. Evaluate the action.
+7. Dispatch the action to a tool through `run_tool()`.
+8. Evaluate the action for the current step.
 9. If a tool enters interactive mode, run `start_interactive_mode()` and then evaluate all plan steps with `evaluate_action_interactive()`.
 10. On failure, classify the error, search similar past failures in `pi/exp/exp.jsonl`, and ask for a recovery decision.
-11. Continue until all steps are done or a limit is reached.
+11. Continue until all steps are done or a configured limit is reached.
+
+Most model calls share `build_system_prompt()` plus role-specific task prompts. Interactive evaluation uses a narrower evaluator system prompt that checks the status of every plan step.
 
 ## Important Runtime State
 
@@ -127,18 +134,21 @@ run_agent("Inspect the current directory and summarize the files.")
 - `last_similar_failures`
 - `CURRENT_WORKING_DIRECTORY`
 
-`program_state` is internal loop/tool metadata. It is passed to tools but is not included in the normal system prompt. Current uses include:
+`program_state` is internal loop/tool metadata. It is passed to tools but is not included in the normal state block shown to the agent. Current uses include:
 
 - `force_next_action`
 - `exp_cache_loaded`
 - `original_goal`
 - `formalized_goal`
 - `INTERACTIVE_MODE`
+- `INTERACTIVE_COMPLETED`
 - `BRANCH_MODE`
+- `ACTIVE_SESSION`
 - `SESSION_LABEL`
+- `BRANCH_WORKING_DIRECTORY`
 - `plan_status`
 
-The interactive plan status map is intentionally kept in `program_state` so the loop can use it without showing that raw bookkeeping back to the agent.
+The interactive plan status map is intentionally kept in `program_state` so the loop can use it without showing raw bookkeeping back to the agent.
 
 ## Tool Actions
 
@@ -150,10 +160,12 @@ The model chooses actions as strings:
 | `search:QUERY_OR_URL` | Search the web or extract text from a URL. |
 | `memadd:TEXT` | Append temporary memory. |
 | `memadd:KEY=VALUE` | Store a runtime key/value in `MEMORYVALS`. |
-| `askuser:QUESTION` | Intended user-input tool. Currently rough in the Pi tool package. |
-| `return:TEXT` | Append text to final returned output. Handled directly by `run_tool()`. |
+| `askuser:QUESTION` | Ask the local user a question. This is handled directly by `run_tool()` with `input()`. |
+| `return:TEXT` | Append text to final returned output. This is handled directly by `run_tool()`. |
 
-Tool documentation lives in `pi/exp/td.txt`. `tool_import()` parses that file and imports the command prefixes it finds in the `Command - prefix:...` field. `return` maps to the module name `return_value`.
+There is no source `memget` tool in the current `pi/tools` directory, so stored `MEMORYVALS` are visible only through runtime state unless a future tool or dispatcher feature adds retrieval/substitution.
+
+Tool documentation lives in `pi/exp/td.txt`. `tool_import()` parses that file and imports the command prefixes it finds in the `Command - prefix:...` field. `return` maps to the module name `return_value` during import, although `return:TEXT` is normally handled directly before dynamic dispatch.
 
 See `TOOLDOCS.md` for the tool contract and how to add new tools.
 
@@ -178,7 +190,7 @@ Highlights:
 
 `pi/tools/search.py` uses `ddgs` to search text queries or extract page text from URLs. It returns a stringified result object and updates `last_tool_output`.
 
-Search requires network access and can be rate-limited.
+Search requires network access and can be rate-limited. One successful retry path currently omits `program_state` from its return object.
 
 ### `memadd`
 
@@ -190,13 +202,13 @@ Search requires network access and can be rate-limited.
 
 Memory is runtime-local unless another caller persists it.
 
+### `askuser`
+
+`askuser:TEXT` is handled directly in `run_tool()` with `input()`. The separate `pi/tools/askuser.py` file is not compatible with the current standard tool contract and should be treated as stale until rewritten.
+
 ### `return`
 
 `return:TEXT` is handled directly in `run_tool()`, not normally by `pi/tools/return_value.py`. It appends `TEXT` to the global `returned_output`.
-
-### `askuser`
-
-`pi/tools/askuser.py` currently reads raw characters forever and does not return the standard tool result shape. It is not compatible with the current Pi runner contract without changes.
 
 ## Experience Store
 
@@ -229,7 +241,7 @@ Similarity is local and simple: fields are tokenized into sparse vectors and com
 | `MAX_LLM_RETRIES` | `6` | Model-call retry limit. |
 | `MAX_RECOVERY_ATTEMPTS` | `6` | Recovery retry/replacement limit. |
 | `TOKENS_PER_GOAL` | `100000` | Approximate token budget per goal. |
-| `EXP_DB_PATH` | `<ABS_PATH>/pi/exp/exp.jsonl` | Experience DB path. |
+| `EXP_DB_PATH` | `<ABS_PATH>/exp/exp.jsonl` | Experience DB path after `ABS_PATH` is expanded to `<project>/pi`. |
 | `SIMILAR_FAILURES_TOP_K` | `5` | Similar failures passed to recovery. |
 | `USE_GOAL_FORMALIZER` | `True` | Whether to rewrite goals before planning. |
 | `MAX_SHELL_OUTPUT` | `200000` | Shell output size before truncation. |
@@ -240,12 +252,24 @@ Similarity is local and simple: fields are tokenized into sparse vectors and com
 | `SUDO_PASSWORD` | none | Optional sudo password. |
 | `TEST_SUDO_PASSWORD` | none | Alternate sudo password variable. |
 
+## TODO
+
+- Implement ShadowFS in the core Pigion runtime so agent file mutations can be staged, inspected, committed, or discarded instead of always touching the host filesystem directly.
+- Move shared runtime behavior out of `pi/run_pi.py`, `laptop/run_laptop.py`, and `platforms/core/whatchdog.py` into a real core module.
+- Replace the hard-coded demo goal with a small CLI or function-first entrypoint.
+- Rewrite `pi/tools/askuser.py` to match the current tool contract or remove it from dynamic import.
+- Decide whether `MEMORYVALS` should get an explicit retrieval/substitution tool and document that behavior in `pi/exp/td.txt`.
+- Fix the `search` retry success return path so it includes `program_state`.
+- Make `tool_import()` parse `pi/exp/td.txt` with a less brittle format.
+
 ## Known Rough Edges
 
 - `pi/run_pi.py` and `laptop/run_laptop.py` are duplicated instead of sharing a core.
-- `ABS_PATH` is required; missing it will break path construction.
+- `platforms/core/whatchdog.py` is a copied runtime snapshot, not a clean reusable core.
+- `ABS_PATH` is required; missing it will break path construction because `pi/run_pi.py` immediately appends `pi`.
 - `tool_import()` error text mentions `tool_import.txt`, but current imports are based on `exp/td.txt`.
-- `pi/tools/askuser.py` does not satisfy the current standard tool contract.
+- `tool_import()` assumes the command field is the third comma-separated field in each `td.txt` line.
+- `pi/tools/askuser.py` does not satisfy the current standard tool contract, even though `askuser:` actions work through direct `run_tool()` handling.
 - `pi/tools/search.py` has one retry path that can return without `program_state` on success.
 - The runner prints raw model output and internal state for debugging.
 - The main runner still uses a hard-coded demo goal.

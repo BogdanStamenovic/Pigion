@@ -1,5 +1,5 @@
 1.Shell, Description: Executes commands and returns stdin/stderr, Command - shell:COMMAND, Example - shell:echo "hi"
-2.Memory, Description: Stores temporary context memory for the current session (not persistent), Command - memadd:TEXT_OR_KEY=VALUE, Example - memadd:User prefers Python, IMPORTANT: memadd is added implicitly, you CANNOT retrieve it.
+2.Memory, Description: Stores temporary context memory for the current session (not persistent); use memadd:TEXT to append plain memory or memadd:KEY=VALUE to store a visible MEMORYVALS entry, Command - memadd:TEXT_OR_KEY=VALUE, Example - memadd:User prefers Python
 3.Search, Description: Performs web search for queries or extracts text content from a URL, Command - search:QUERY_OR_URL, Example - search:openai api or search:https://example.com
 4.Return, Description: Returns something back to the user at the end of the goal if needed, Command - return:TEXT, Example - return:The task has been completed succesfully
-5.AskUser, Description: Asks the user for information and returns the user answer, Command - askuser:TEXT, Example - askuser:Can you provide your location?
+5.AskUser, Description: Asks the local user for information and returns the typed answer, Command - askuser:TEXT, Example - askuser:Can you provide your location?
