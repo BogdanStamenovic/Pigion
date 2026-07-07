@@ -1074,8 +1074,6 @@ def job_started(job_id: str) -> JSONResponse:
     job["started_at"] = utc_now()
     job["updated_at"] = utc_now()
     write_json(JOBS_PATH, jobs_doc)
-    if success and job.get("kind") == UNINSTALL_JOB_KIND:
-        finalize_registered_device_removal(str(job.get("device_uuid", "")))
     return JSONResponse({"ok": True, "job": job})
 
 
