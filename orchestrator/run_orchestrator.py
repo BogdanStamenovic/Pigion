@@ -357,15 +357,22 @@ RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
 CORE EXECUTION RULES:
-- Your only runtime job is to route the user's goal to one registered device tool.
+- Your runtime job is to route the user's goal through registered device tools.
 - Registered device tools are listed in AVAILABLE_TOOLS.
 - Device tools are named by device name, for example device_Bogdan:GOAL.
 - Do not use UUIDs in model-visible tool calls. UUIDs are private to the generated tool implementation.
 - Do not do the device's work yourself.
 - Do not invent devices or tools that are not listed in AVAILABLE_TOOLS.
 - If no suitable registered device tool exists, report that routing is blocked.
-- If a suitable device exists, choose the matching device tool and pass the user's goal as the tool input.
+- For each action, choose exactly one matching device tool and pass the needed goal or message as the tool input.
 - The expected internal reasoning is simple: "yea, I should call this device tool for this goal."
+- Registered devices do not share your context, memory, action history, or information from other devices.
+- Treat yourself as the middle man between devices.
+- If a goal requires communication between two or more devices, broker that communication yourself:
+  first ask device A for the needed information, wait for that result in action history, then include the relevant
+  information explicitly in the goal you send to device B.
+- Never assume device B knows what device A said unless you explicitly put that information in device B's goal.
+- Never tell one device to ask another device directly. Communicate through orchestrator actions.
 
 STRICT OUTPUT RULES:
 - Output ONLY valid JSON.
@@ -422,7 +429,7 @@ def formalize_goal(goal: str) -> str:
     Returns plain text only. This function MUST NOT produce JSON, plans,
     numbered steps, tool calls, or add information not implied by the goal.
     """
-    system = """
+    system = r"""
 You are a goal formalizer for a device orchestrator.
 
 Transform the user's goal into a clearer and more explicit version of the same goal.
@@ -436,6 +443,10 @@ Rules:
 - Make implicit assumptions explicit.
 - Make locations, files, directories, repositories, URLs, resources, and targets explicit when mentioned.
 - Clarify ambiguous references when possible from context.
+- When a goal involves more than one device, favor grouping and ordering the work by what each single device can do locally.
+- If one device must produce information for another device, rewrite the goal so the producing device first creates, saves, or exposes that information in a concrete way, and then the consuming device retrieves or uses it.
+- Do not preserve the user's original action order if it splits apart actions that can be completed together on the same device.
+- Do not make devices depend on hidden orchestrator context or on another device's private state; any cross-device handoff should have an explicit shared artifact, saved file, server endpoint, or message content.
 - Keep the result concise.
 - The output should still read like a goal to be sent to a watchdog device, not like documentation or a specification.
 - Return plain text only.
@@ -452,6 +463,12 @@ Make a file called test.txt on my desktop and open it.
 
 Output:
 Go into the users desktop folder and write the required content into the file called test.txt, and open that desktop file in Notepad.
+Example 3:
+Input:
+Get the temperature of the rpi device and make the kali device write that temperature to the home directory.
+
+Output:
+On the rpi device, get the current temperature, save that temperature, and set up a simple server endpoint that exposes the saved temperature. Then on the kali device, retrieve the temperature from the rpi device's server endpoint and save it to the kali device's home directory.
 
 The output should not contatin implications. Everything implied should be explicitly stated.
 For example. If the user says "Sort the files in this folder", you should NOT ommit the directions to change the folder. Nothing should be implied!
@@ -521,11 +538,13 @@ Return ONLY:
 }
 
 RULES:
-- The plan should be about choosing and calling the right registered device.
+- The plan should be about choosing and calling the right registered device or devices.
 - Steps must NOT be tool calls.
 - 1 to 3 steps maximum.
 - Do NOT create subplans.
 - Do NOT describe doing the device work yourself.
+- If the goal needs information from one device before another device can act, include separate broker steps:
+  ask the first device for the information, then send that information explicitly to the second device.
 - Do NOT include extra fields.
 """
     result = call_llm(prompt, system)
@@ -594,6 +613,9 @@ RULES:
 - Use only a device tool listed in AVAILABLE_TOOLS.
 - Tool names must use the registered device name, not a UUID.
 - Pass the original user goal or the formalized goal as the device tool input.
+- If this is a cross-device handoff, pass only the current device's task plus all relevant information already gathered from previous device outputs.
+- Do not assume devices share context; include the transferred information explicitly in the next device's goal.
+- If the needed information is not yet available, call the device that has that information before calling the device that needs it.
 - The correct routing thought is: yea, I should call this device tool.
 - If CURRENT STEP is already complete, return status "done" and next_action "".
 - If no device is registered or no listed device matches, return status "fail" and next_action "".
@@ -656,7 +678,7 @@ Return ONLY:
 
 RULES:
 - Mark "done" if the tool output says a job was queued for a device.
-- Mark "ongoing" only if another registered device call is still needed.
+- Mark "ongoing" if another registered device call is still needed, including when the queued device output contains information that must be forwarded to another device.
 - Mark "fail" if no job was queued, the action used an unregistered tool, or the action tried to do device work locally.
 """
     result = call_llm(prompt, system)
