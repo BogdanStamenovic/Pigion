@@ -8,3 +8,17 @@ test/
 test.py
 laptop_exp/enving.txt
 pi_exp/enving.txt
+
+# Runtime server state and generated installers
+/server/config.json
+/server/devices.json
+/server/jobs.json
+/server/sessions.json
+/server/installers/
+
+# Generated remote-device tools
+/orchestrator/tools/device_*.py
+/orchestrator/exp/td.txt
+
+# Local agent memory
+/pi/exp/permamemory.json

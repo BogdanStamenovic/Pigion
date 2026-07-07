@@ -17,6 +17,22 @@ Pigion/
   file_sort_test copy.py
   test.py
   agent_test_makers/
+  server/
+    server.py
+    device_client.py
+    web_store.py
+    devices.json
+    jobs.json
+    config.json
+    sessions.json
+    installers/
+  orchestrator/
+    run_orchestrator.py
+    exp/
+      td.txt
+      enving.txt
+      exp.jsonl
+    tools/
   laptop/
     run_laptop.py
     exp/
@@ -38,11 +54,11 @@ Pigion/
   platforms/
     core/
       whatchdog.py
-    pi/
+    linux/
     windows/
 ```
 
-`pi/` is the active runtime and tool package. `laptop/` and `platforms/` are older/generated platform snapshots and reference implementations; they are useful for comparison, but `pi/run_pi.py` is the current development target.
+`pi/` is the active local runtime and tool package. `server/` contains the lightweight FastAPI dashboard, JSON storage, device polling API, and installers. `orchestrator/` is the orchestrator agent package; generated device tool modules are written to `orchestrator/tools/` because `orchestrator/run_orchestrator.py` imports tools from `orchestrator/exp/td.txt`.
 
 ## Requirements
 
@@ -52,6 +68,8 @@ Runtime dependencies are in `requirements.txt`:
 - `python-dotenv` for `.env` loading.
 - `ddgs` for search and URL extraction.
 - `protobuf`, used by the Google client stack.
+- `fastapi` for the orchestrator dashboard and device API.
+- `uvicorn` for serving the orchestrator dashboard.
 
 Python 3 is required.
 
@@ -86,6 +104,10 @@ SUDO_PASSWORD=""
 TEST_SUDO_PASSWORD=""
 GEMINI_MODEL="gemini-2.5-flash-lite"
 LLM_TEMPERATURE="0.3"
+PIGION_ORCHESTRATOR_USER="admin"
+PIGION_ORCHESTRATOR_PASSWORD="pigion"
+PIGION_SERVER_URL="http://127.0.0.1:8000"
+PIGION_HEARTBEAT_TIMEOUT="60"
 ```
 
 ## Running
@@ -103,6 +125,137 @@ from pi.run_pi import run_agent
 
 run_agent("Inspect the current directory and summarize the files.")
 ```
+
+## Orchestrator Dashboard
+
+`server/server.py` is a small FastAPI app for registering watchdog devices, queueing work, and showing device/job status. It intentionally uses JSON files only:
+
+| File | Purpose |
+| --- | --- |
+| `server/devices.json` | Registered devices, UUIDs, generated command names, installer paths, and heartbeat state. |
+| `server/jobs.json` | Queued, running, finished, and failed goals. |
+| `server/config.json` | Login defaults, heartbeat timeout, session TTL, and public server URL. |
+| `server/sessions.json` | Login session cookies. |
+
+Start it with:
+
+```bash
+python -m uvicorn server.server:app --host 127.0.0.1 --port 8000
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000/login
+```
+
+The default login is `admin` / `pigion`. For real use, set `PIGION_ORCHESTRATOR_USER` and `PIGION_ORCHESTRATOR_PASSWORD` before the first run, or edit `server/config.json`.
+
+The dashboard currently includes:
+
+- Device list with heartbeat status.
+- `(DEVICE IS DOWN)` display when the last heartbeat is older than `heartbeat_timeout_seconds`.
+- Queue counts for running and waiting jobs.
+- Recent goals.
+- Recent logs.
+- Register Device page.
+- Remove Registered Device page.
+- Send Goal page.
+
+### Device Registration
+
+The Register Device page does the first-pass provisioning work:
+
+1. Runs `git pull` in the project root.
+2. Asks the same core questions as `maker.py`: watchdog name, platform template, tools, OS, and terminal.
+3. Requires explicit tool selection; it does not auto-select every available tool.
+4. Prompts for the target device API token and sudo password.
+5. Prompts for the browser-facing `td.txt` capability block used by the orchestrator.
+6. Calls `maker.create_instance()` with the selected platform, selected tools, and entered environment text.
+7. Generates a UUID for the device.
+8. Stores the device in `server/devices.json`.
+9. Generates install endpoints under `/install/<uuid>...`.
+10. Adds a device command to `orchestrator/exp/td.txt`.
+11. Generates the matching `orchestrator/tools/device_DEVICE_NAME.py` module. The agent sees the device name in the command; the generated tool keeps the UUID internally.
+
+The generated orchestrator tool queues a goal for that device. The command name uses the registered device name, not the UUID. For example, after registering a device named `Bogdan`, the orchestrator may advertise:
+
+```text
+device_Bogdan:Check system temperature
+```
+
+Because `orchestrator/run_orchestrator.py` imports tools from `orchestrator/exp/td.txt`, the generated tool module is required. The `td.txt` entry also preserves the current brittle parser shape: the third comma-separated field must contain `Command - prefix:...`.
+
+The final registration page prints an installer command:
+
+```bash
+curl -fsSL http://127.0.0.1:8000/install/<device_uuid>.sh | bash
+```
+
+Set `PIGION_SERVER_URL` to the reachable host name before registering devices if the device should install from another machine, for example:
+
+```env
+PIGION_SERVER_URL="http://pigion:8000"
+```
+
+The generated `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs from `/opt/pigion/DEVICE_NAME` by default. Override that with `PIGION_INSTALL_ROOT` when running the installer.
+
+The target `.env` is populated automatically from registration:
+
+```env
+ABS_PATH="/opt/pigion/DEVICE_NAME"
+API_KEY="..."
+SUDO_PASSWORD="..."
+TEST_SUDO_PASSWORD="..."
+```
+
+The sudo password is also used by the installer for its privileged setup steps. Because these values are embedded in the generated installer endpoint and stored in local JSON for now, treat `server/devices.json` and `/install/<uuid>.sh` as sensitive.
+
+The generated device-side `client.py`:
+
+1. Sends heartbeat updates.
+2. Polls for waiting jobs.
+3. Sends the goal to that device's generated watchdog runner.
+4. Marks the job started/running/finished or failed.
+5. Sends result/error data and logs back to the server.
+
+### Device Removal
+
+The dashboard has a `Remove Registered Device` action. Removing a device deletes its record from `server/devices.json`, deletes queued jobs for that device, removes the generated `orchestrator/tools/device_DEVICE_NAME.py` module, removes the matching `orchestrator/exp/td.txt` entry, deletes the generated installer and generated local package, and best-effort disables/removes a local `pigion_DEVICE_NAME.service` plus `/opt/pigion/DEVICE_NAME` when the orchestrator is running on the same machine.
+
+### Device Client API
+
+Watchdog devices poll the server instead of using WebSockets. The current API is:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/jobs/<device_uuid>` | Return the next waiting job for a device, or `{"job": null}`. |
+| `POST` | `/api/jobs/<job_id>/started` | Mark a job as running. |
+| `POST` | `/api/jobs/<job_id>/progress` | Update progress text and optionally append a log line. |
+| `POST` | `/api/jobs/<job_id>/finished` | Mark a job finished or failed with result/error data. |
+| `POST` | `/api/device/<uuid>/heartbeat` | Refresh the device heartbeat and mark it online. |
+| `POST` | `/api/device/<uuid>/logs` | Append device/job logs. |
+
+There is also a generic polling client at `server/device_client.py` for local testing:
+
+```bash
+python server/device_client.py \
+  --server http://127.0.0.1:8000 \
+  --uuid <device_uuid> \
+  --runner <package>.run_<package>
+```
+
+The generated installer command shown after registration runs this client with the device UUID and generated runner module. The client loop is intentionally simple:
+
+1. Send heartbeat.
+2. Poll for a waiting job.
+3. If a job exists, mark it started.
+4. Run the generated watchdog runner against the goal.
+5. Report success, failure, current status, and logs.
+
+### Orchestrator Scope
+
+This first implementation deliberately does not include WebSockets, Docker, PostgreSQL, user accounts, HTTPS, OAuth, multiple orchestrators, multi-device jobs, async distributed execution, plugin systems, or auto-discovery.
 
 ## Runner Flow
 

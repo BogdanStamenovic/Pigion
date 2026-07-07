@@ -495,6 +495,62 @@ For example. If the user says "Sort the files in this folder", you should NOT om
     raise RuntimeError(f"Goal formalizer failed after retries: {last_error}")
 
 
+def summarize_completed_goal(
+    *,
+    original_goal: str,
+    formalized_goal: str,
+    plan: List[str],
+    completed_steps: List[str],
+    action_history: List[Dict[str, Any]],
+    returned_text: str,
+    memory: str,
+    state: Dict[str, Any],
+) -> str:
+    system = """
+You are the final completion summarizer for a task-running agent.
+
+Your job is to summarize what the agent actually did after the task is complete.
+Be concrete, concise, and honest. Mention important outputs, files, commands,
+errors recovered from, and final state when present. Do not invent work that is
+not supported by the provided history/state.
+"""
+    prompt = f"""
+ORIGINAL GOAL:
+{original_goal}
+
+FORMALIZED GOAL:
+{formalized_goal}
+
+PLAN:
+{safe_json(plan)}
+
+COMPLETED STEPS:
+{safe_json(completed_steps)}
+
+ACTION HISTORY:
+{safe_json(trim_history(action_history, keep_last=30))}
+
+RETURNED TEXT SO FAR:
+{returned_text}
+
+MEMORY:
+{memory}
+
+FINAL STATE:
+{safe_json(state)}
+
+Return ONLY:
+{{
+  "summary": "A concise first-person summary of what I did and the final result."
+}}
+"""
+    result = call_llm(prompt, system)
+    summary = str(result.get("summary", "")).strip()
+    if not summary:
+        raise RuntimeError("Final summary LLM returned an empty summary.")
+    return summary
+
+
 
 # =========================
 # PLAN
@@ -657,6 +713,7 @@ Return ONLY:
 RULES:
 - Mark "done" ONLY if the CURRENT STEP itself is complete.
 - Do NOT mark "done" because future-step work was started.
+- Do NOT mark "ongoing" if the CURRENT STEP is complete.
 - If the action was useful but the CURRENT STEP is not finished, return "ongoing".
 - If the action failed or violated step scope, return "fail".
 """
@@ -859,6 +916,193 @@ def plan_status_reason(plan_status: Dict[str, str]) -> str:
     return f"Interactive evaluation marked {done_count}/{len(plan_status)} plan steps done."
 
 
+def _is_shell_session_label(label: str) -> bool:
+    label = label.strip()
+    if not label:
+        return False
+    return label.startswith("@") or bool(re.fullmatch(r"[A-Za-z0-9_.-]+_interactive", label))
+
+
+def interactive_cwd_identifier(state: Dict[str, Any], program_state: Dict[str, Any]) -> str:
+    cwd = str(
+        program_state.get("BRANCH_WORKING_DIRECTORY")
+        or program_state.get("CURRENT_WORKING_DIRECTORY")
+        or state.get("CURRENT_WORKING_DIRECTORY")
+        or os.getcwd()
+    ).strip()
+
+    while " - " in cwd:
+        label, rest = cwd.split(" - ", 1)
+        if not _is_shell_session_label(label):
+            break
+        cwd = rest.strip()
+
+    return cwd or os.getcwd()
+
+
+def _tool_forces_fresh_interactive_start(program_state: Dict[str, Any]) -> bool:
+    for key in (
+        "force_interactive_start_fresh",
+        "INTERACTIVE_FORCE_START_FRESH",
+        "interactive_start_fresh",
+    ):
+        value = program_state.get(key)
+        if isinstance(value, str):
+            if value.strip().lower() in ("1", "true", "yes", "on", "fresh", "scratch"):
+                program_state[key] = False
+                return True
+        elif bool(value):
+            program_state[key] = False
+            return True
+    return False
+
+
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def get_latest_interactive_summary(program_state: Dict[str, Any], cwd_id: str) -> Optional[Dict[str, Any]]:
+    summaries = program_state.get("interactive_where_left_off", {})
+    if not isinstance(summaries, dict):
+        return None
+    item = summaries.get(cwd_id)
+    return item if isinstance(item, dict) else None
+
+
+def decide_interactive_resume(
+    goal: str,
+    current_step: str,
+    prior_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    system = """
+You decide whether a new interactive tool session should use a previous same-directory session summary.
+
+You MUST always respond in valid JSON.
+"""
+    prompt = f"""
+The agent is starting a new interactive session in the same working-directory identifier as a previous session.
+
+GLOBAL GOAL:
+{goal}
+
+CURRENT STEP:
+{current_step}
+
+WHERE-LEFT-OFF SUMMARY:
+{safe_json(prior_summary)}
+
+Return ONLY:
+{{
+  "continue_where_left_off": true,
+  "resume_input": "...",
+  "reason": "..."
+}}
+
+RULES:
+- Return true when the previous summary is relevant to the goal and current step.
+- Return false when the previous summary is unrelated, stale, risky, or conflicts with the current step.
+- If continue_where_left_off is true, resume_input should be the exact single input to send immediately to the active interactive tool session.
+- Prefer the summary's next_suggested_input when it is still appropriate.
+- If there is no safe immediate input, set resume_input to "".
+- Do NOT include multiple commands separated by newlines in resume_input.
+- Be concise.
+"""
+    result = call_llm(prompt, system)
+    result["continue_where_left_off"] = _parse_bool(result.get("continue_where_left_off"), default=False)
+    result["resume_input"] = str(result.get("resume_input", "")).strip()
+    result.setdefault("reason", "No reason provided")
+    return result
+
+
+def summarize_interactive_session(
+    goal: str,
+    current_step: str,
+    tool: str,
+    cwd_id: str,
+    action_history: List[Dict[str, Any]],
+    output: str,
+) -> Dict[str, Any]:
+    system = """
+You summarize completed interactive tool sessions for future continuation.
+
+You MUST always respond in valid JSON.
+"""
+    prompt = f"""
+Summarize what was done in the interactive session so a later session in the same working directory can decide whether to continue where this one left off.
+
+GLOBAL GOAL:
+{goal}
+
+CURRENT STEP:
+{current_step}
+
+TOOL:
+{tool}
+
+WORKING DIRECTORY IDENTIFIER:
+{cwd_id}
+
+RECENT INTERACTIVE HISTORY:
+{safe_json(trim_history(action_history, keep_last=12))}
+
+FINAL OUTPUT:
+{output}
+
+Return ONLY:
+{{
+  "summary": "...",
+  "completed": ["..."],
+  "remaining": ["..."],
+  "next_suggested_input": "...",
+  "risk_notes": ["..."]
+}}
+
+RULES:
+- Summarize concrete actions and observed results.
+- Include what remains only if it follows from the session.
+- Do not invent facts that are not in the history or output.
+- Be concise.
+"""
+    result = call_llm(prompt, system)
+    summary = {
+        "summary": str(result.get("summary", "")).strip() or "Interactive session ended with no summary.",
+        "completed": result.get("completed", []),
+        "remaining": result.get("remaining", []),
+        "next_suggested_input": str(result.get("next_suggested_input", "")).strip(),
+        "risk_notes": result.get("risk_notes", []),
+        "goal": goal,
+        "current_step": current_step,
+        "tool": tool,
+        "cwd_identifier": cwd_id,
+        "saved_at": time.time(),
+    }
+    return summary
+
+
+def save_interactive_summary(program_state: Dict[str, Any], cwd_id: str, summary: Dict[str, Any]) -> None:
+    summaries = program_state.setdefault("interactive_where_left_off", {})
+    if not isinstance(summaries, dict):
+        summaries = {}
+        program_state["interactive_where_left_off"] = summaries
+    summaries[cwd_id] = summary
+
+    history = program_state.setdefault("interactive_where_left_off_history", [])
+    if isinstance(history, list):
+        history.append(summary)
+        if len(history) > 20:
+            del history[:-20]
+
+
 def start_interactive_mode(
     goal: str,
     plan: List[str],
@@ -874,9 +1118,109 @@ def start_interactive_mode(
     local_state = dict(state)
     ExitInteractiveMode = False
     print(f"🔧 INTERACTIVE MODE STARTED for tool: {tool}.")
+    cwd_id = interactive_cwd_identifier(local_state, program_state)
+    resume_context = ""
+    resume_input_to_execute = ""
+    forced_fresh = _tool_forces_fresh_interactive_start(program_state)
+    prior_summary = get_latest_interactive_summary(program_state, cwd_id)
+
+    if forced_fresh:
+        program_state["interactive_resume_decision"] = {
+            "cwd_identifier": cwd_id,
+            "continue_where_left_off": False,
+            "reason": "Tool forced a fresh interactive session start.",
+            "forced_by_tool": True,
+        }
+        print(f"🧭 WHERE LEFT OFF for {cwd_id}: skipped because the tool forced a fresh start.")
+    elif prior_summary:
+        resume_decision = decide_interactive_resume(goal, current_step, prior_summary)
+        program_state["interactive_resume_decision"] = {
+            "cwd_identifier": cwd_id,
+            "continue_where_left_off": resume_decision["continue_where_left_off"],
+            "resume_input": resume_decision.get("resume_input", ""),
+            "reason": resume_decision.get("reason", "No reason provided"),
+            "forced_by_tool": False,
+            "summary": prior_summary,
+        }
+        print(f"🧭 WHERE LEFT OFF for {cwd_id}:")
+        print(safe_json(prior_summary))
+        print(
+            "🧭 RESUME DECISION:",
+            "continue" if resume_decision["continue_where_left_off"] else "start fresh",
+            "-",
+            resume_decision.get("reason", "No reason provided"),
+        )
+        if resume_decision["continue_where_left_off"]:
+            resume_input_to_execute = str(
+                resume_decision.get("resume_input")
+                or prior_summary.get("next_suggested_input", "")
+            ).strip()
+            resume_context = f"""
+WHERE LEFT OFF IN THIS WORKING DIRECTORY:
+{safe_json(prior_summary)}
+
+The model decided this is relevant to the current goal and step.
+The runner will execute the resume input first when one is available, then continue normal interactive control.
+"""
+    else:
+        program_state["interactive_resume_decision"] = {
+            "cwd_identifier": cwd_id,
+            "continue_where_left_off": False,
+            "reason": "No previous interactive summary for this working-directory identifier.",
+            "forced_by_tool": False,
+        }
     action_history.append(
                 "INTERACTIVE_MODE_STARTED",
             )
+    if resume_input_to_execute:
+        print(f"▶️ EXECUTING WHERE-LEFT-OFF RESUME INPUT: {resume_input_to_execute}")
+        full = TOOLS[tool](resume_input_to_execute, memory, local_state, program_state=program_state)
+        output = full.get("output", "")
+        if full.get("completed", False):
+            ExitInteractiveMode = True
+        program_state = full.get("program_state", program_state)
+        local_state = full.get("state", local_state)
+        program_state["interactive_resume_executed"] = {
+            "cwd_identifier": cwd_id,
+            "tool": tool,
+            "input": resume_input_to_execute,
+            "completed": bool(full.get("completed", False)),
+            "executed_at": time.time(),
+        }
+        action_history.append(
+            {
+                "INPUT": resume_input_to_execute,
+                "OUTPUT": output,
+                "resume_executed": True,
+            }
+        )
+    elif program_state.get("SHELL_PENDING_RESUME_SESSION") and tool == "shell":
+        decision = program_state.get("interactive_resume_decision", {})
+        should_resume = bool(decision.get("continue_where_left_off")) if isinstance(decision, dict) else False
+        internal_command = "__PIGION_SHELL_RESUME_SAVED__" if should_resume else "__PIGION_SHELL_START_FRESH__"
+        print(f"▶️ SHELL {'RESUMING SAVED BRANCH' if should_resume else 'STARTING FRESH BRANCH'}")
+        full = TOOLS[tool](internal_command, memory, local_state, program_state=program_state)
+        output = full.get("output", "")
+        if full.get("completed", False):
+            ExitInteractiveMode = True
+        program_state = full.get("program_state", program_state)
+        local_state = full.get("state", local_state)
+        program_state["interactive_resume_executed"] = {
+            "cwd_identifier": cwd_id,
+            "tool": tool,
+            "input": "",
+            "resumed_saved_session": should_resume,
+            "completed": bool(full.get("completed", False)),
+            "executed_at": time.time(),
+        }
+        action_history.append(
+            {
+                "INPUT": internal_command,
+                "OUTPUT": output,
+                "resume_executed": should_resume,
+                "fresh_start_executed": not should_resume,
+            }
+        )
     while not ExitInteractiveMode:
         system = f"""
 You are an autonomous agent
@@ -890,7 +1234,9 @@ PLAN FRAMEWORK:
 {safe_json(plan)}
 
 RUNTIME STATE:
-{safe_json(state)}
+{safe_json(local_state)}
+
+{resume_context}
 
 RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
@@ -940,6 +1286,22 @@ OUTPUT:
     action_history.append(
                 "INTERACTIVE_MODE_ENDED",
             )
+    try:
+        cwd_id = interactive_cwd_identifier(local_state, program_state)
+        summary = summarize_interactive_session(
+            goal=goal,
+            current_step=current_step,
+            tool=tool,
+            cwd_id=cwd_id,
+            action_history=action_history,
+            output=str(output),
+        )
+        save_interactive_summary(program_state, cwd_id, summary)
+        print(f"📝 INTERACTIVE SESSION SUMMARY SAVED for {cwd_id}:")
+        print(safe_json(summary))
+    except Exception as e:
+        program_state["interactive_summary_error"] = str(e)
+        print(f"Interactive summary error: {e}")
     return {
         "ok": True,
         "output": output,
@@ -960,7 +1322,10 @@ def run_tool(action: str, memory: str, state: Dict[str, Any], program_state: Dic
         output = action[len("return:") :].strip()
         local_state["last_tool_output"] = output
         global returned_output
-        returned_output = returned_output + output
+        if returned_output and output:
+            returned_output = returned_output + "\n" + output
+        else:
+            returned_output = returned_output + output
         return {
             "ok": True,
             "output": output,
@@ -1228,6 +1593,7 @@ def run_agent(goal: str) -> None:
 
     steps = create_plan(formalized_goal, memory=memory, state=agent_state)
     completed_steps: List[str] = []
+    goal_action_history: List[Dict[str, Any]] = []
 
     print("PLAN:", steps)
 
@@ -1280,6 +1646,13 @@ def run_agent(goal: str) -> None:
                     tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
                     memory = tool_result["memory"]
                     agent_state = tool_result["state"]
+                    goal_action_history.append(
+                        {
+                            "step": current_step,
+                            "action": next_action,
+                            "tool_output": str(tool_result.get("output", "")),
+                        }
+                    )
                     finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
                 else:
                     agent_state["pending_failure"] = None
@@ -1333,6 +1706,9 @@ def run_agent(goal: str) -> None:
 
             tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
             if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
+                program_state = tool_result.get("program_state", program_state)
+                memory = tool_result["memory"]
+                agent_state = tool_result["state"]
                 tool_result = start_interactive_mode(
                     goal=formalized_goal,
                     plan=steps,
@@ -1350,6 +1726,14 @@ def run_agent(goal: str) -> None:
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
                 tool_output = str(tool_result["output"])
+                goal_action_history.append(
+                    {
+                        "step": current_step,
+                        "action": next_action,
+                        "tool_output": tool_output,
+                        "interactive_history": tool_result.get("action_history", []),
+                    }
+                )
                 evaluation = evaluate_action_interactive(
                     goal=formalized_goal,
                     plan=steps,
@@ -1369,6 +1753,13 @@ def run_agent(goal: str) -> None:
                 tool_output = str(tool_result["output"])
                 action_history.append(
                     {
+                        "action": next_action,
+                        "tool_output": tool_output,
+                    }
+                )
+                goal_action_history.append(
+                    {
+                        "step": current_step,
                         "action": next_action,
                         "tool_output": tool_output,
                     }
@@ -1487,7 +1878,31 @@ def run_agent(goal: str) -> None:
                 f"Step did not finish within MAX_ACTIONS_PER_STEP={MAX_ACTIONS_PER_STEP}: {current_step}"
             )
 
+    final_summary = summarize_completed_goal(
+        original_goal=original_goal,
+        formalized_goal=formalized_goal,
+        plan=steps,
+        completed_steps=completed_steps,
+        action_history=goal_action_history,
+        returned_text=returned_output,
+        memory=memory,
+        state=agent_state,
+    )
+    summary_return = run_tool(f"return:{final_summary}", memory, agent_state, program_state=program_state)
+    memory = summary_return["memory"]
+    agent_state = summary_return["state"]
+    program_state = summary_return.get("program_state", program_state)
+    goal_action_history.append(
+        {
+            "step": "final_summary",
+            "action": "return:<final summary>",
+            "tool_output": str(summary_return.get("output", "")),
+        }
+    )
+
     print(f"\n\n\n\n\nReturned output from agent: {returned_output}")
+    print("\n📝 FINAL TASK SUMMARY:")
+    print(final_summary)
     print(
         f"\n🏁 GOAL FINISHED: Agent execution completed and used up:{tokens_used}/{TOKENS_PER_GOAL} tokens for this goal."
     )
@@ -1495,6 +1910,7 @@ def run_agent(goal: str) -> None:
     print(memory)
     print("\n📦 FINAL STATE:")
     print(safe_json(agent_state), "\n\n\n\nPROGRAM STATE:", safe_json(program_state))
+    return returned_output
 
 
 
@@ -1504,7 +1920,7 @@ def run_agent(goal: str) -> None:
 if __name__ == "__main__":
     try:
         run_agent( 
-            "sshpass into bodas@pigion with the password Dobrica111, while inside the server make a file called hi.txt in which you will save the temperature of the device and then sftp inside the pigion server and download the file Hi.txt to the local machine. Then read the contents of the file and return it as output.")
+            "Find the gateway of this network and then scan it and check if there are any known vaulnrabilites. if there are any. report them to me.")
     finally:
         try:
             client.close()

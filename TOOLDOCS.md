@@ -242,7 +242,72 @@ When the interactive session ends, return:
 }
 ```
 
-The runner then calls `evaluate_action_interactive()`, which asks the model to evaluate all plan steps. The resulting `plan_status` map is stored in `program_state`, and the loop updates the plan and jumps to the next unfinished step.
+When the interactive session ends, the runner asks the LLM to summarize what happened and stores that summary in `program_state["interactive_where_left_off"]`, keyed by the current working-directory identifier. The runner then calls `evaluate_action_interactive()`, which asks the model to evaluate all plan steps. The resulting `plan_status` map is stored in `program_state`, and the loop updates the plan and jumps to the next unfinished step.
+
+## Where-Left-Off Summaries
+
+The Pi runner keeps interactive-session continuation notes in `program_state` for the current agent run:
+
+```python
+program_state["interactive_where_left_off"] = {
+    "/home/user/project": {
+        "summary": "what was done",
+        "completed": ["observed completed work"],
+        "remaining": ["likely remaining work"],
+        "next_suggested_input": "optional next input",
+        "risk_notes": ["optional caution"],
+        "goal": "...",
+        "current_step": "...",
+        "tool": "shell",
+        "cwd_identifier": "/home/user/project",
+        "saved_at": 1234567890.0,
+    }
+}
+```
+
+At the start of a later interactive session in the same working-directory identifier, the runner asks the LLM whether the previous summary is relevant to the current goal and current step. The summary and decision are printed to the console. If the LLM chooses to continue, shell resumes the saved live branch session when it still exists. If the decider also returns a `resume_input`, the runner sends that input into the resumed branch before the normal interactive loop continues. The execution is recorded in `program_state["interactive_resume_executed"]`.
+
+The shell tool is wired into this store. When a new shell branch session starts in a cwd that has a saved where-left-off summary, `pi/tools/shell.py` prepends a compact summary to the first branch output and records shell-specific metadata:
+
+```python
+program_state["SHELL_WHERE_LEFT_OFF_CWD"]
+program_state["SHELL_WHERE_LEFT_OFF_AVAILABLE"]
+program_state["SHELL_WHERE_LEFT_OFF_FORCED_FRESH"]
+program_state["SHELL_WHERE_LEFT_OFF_SUMMARY"]
+```
+
+The shell does not decide to replay `next_suggested_input` by itself. It exposes the summary and saved branch to the runner and LLM decider. If the decider returns `continue_where_left_off: true`, shell reattaches the saved PTY branch. If the decider returns `continue_where_left_off: false`, shell kills the saved branch and starts a fresh branch from the original launch command.
+
+The working-directory identifier follows the shell tool's decoration rules. A branch cwd like:
+
+```text
+sftp_interactive - /home/user/project
+```
+
+is treated as:
+
+```text
+/home/user/project
+```
+
+This means a later `shell` interactive session in the same real directory can see the previous where-left-off summary, even if the active shell session label changes.
+
+## Forcing A Fresh Interactive Start
+
+An interactive-capable tool can override the where-left-off question and force the runner to ignore any previous same-directory summary for the next interactive session. Set one of these one-shot flags in `program_state` before returning `interactive_mode: True`:
+
+```python
+program_state["force_interactive_start_fresh"] = True
+```
+
+Compatibility aliases are also accepted:
+
+```python
+program_state["INTERACTIVE_FORCE_START_FRESH"] = True
+program_state["interactive_start_fresh"] = True
+```
+
+When this flag is set, the runner records `program_state["interactive_resume_decision"]` with `continue_where_left_off: False`, prints that the tool forced a fresh start, clears the flag, and does not ask the LLM whether to resume. If the tool also needs to reset a PTY, socket, remote connection, or other handle, it should do that cleanup itself before returning control to the runner.
 
 ## Interactive Tool Requirements
 
@@ -254,6 +319,7 @@ An interactive-capable tool needs these pieces:
 - A completion detector.
 - A prompt/idle detector for deciding when to return control to the agent.
 - A cleanup path.
+- Optional: a `program_state["force_interactive_start_fresh"] = True` override when previous same-directory interactive summaries should be ignored.
 
 For shell-like tools, do not derive a new label from every interactive input. If the launch command is `sftp user@host`, the branch should keep a label such as `sftp_interactive` for the whole branch. Passwords, `echo`, `put`, `get`, and other input lines should not create labels like `password_interactive` or `echo_interactive`.
 
@@ -292,9 +358,11 @@ Continuation flow:
 3. The original `_BRANCH_SESSION_LABEL` is reused.
 4. The tool returns the latest output and whether the branch is still active.
 
-Termination:
+Termination and detach:
 
-- Input `done` resets the branch shell and returns `[interactive branch terminated]`.
+- Input `done` detaches and saves a still-running branch shell under `program_state["SHELL_INTERACTIVE_SESSION_NAME"]` instead of killing it.
+- A later same-session launch can resume that saved PTY if the decider chooses `continue_where_left_off: true`.
+- If the decider chooses a fresh start, shell kills the saved branch and launches a new branch.
 - Special keys such as `SIGINT`, `EOF`, and `SIGTSTP` are supported by the shell tool.
 - `shell_reset()` cleans up main and branch shells.
 

@@ -19,6 +19,9 @@ _BRANCH_PID = None
 _BRANCH_FD = None
 _BRANCH_MARKER = None
 _BRANCH_SESSION_LABEL = None
+_BRANCH_SESSION_NAME = None
+_BRANCH_CWD = None
+_SAVED_BRANCHES: Dict[str, Dict[str, Any]] = {}
 
 _COUNTER = 0
 _LOCK = threading.Lock()
@@ -212,16 +215,17 @@ def _start_shell() -> None:
 
 
 def _start_branch_shell(cwd: Optional[str] = None) -> None:
-    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_CWD
     if _shell_alive(_BRANCH_PID):
         return
-    _BRANCH_PID, _BRANCH_FD = _spawn_pty_shell(cwd or _START_CWD)
+    _BRANCH_CWD = cwd or _START_CWD
+    _BRANCH_PID, _BRANCH_FD = _spawn_pty_shell(_BRANCH_CWD)
     _BRANCH_MARKER = f"__BRANCH_DONE_{time.time_ns()}__"
     _prepare_shell_fd(_BRANCH_FD)
 
 
 def _reset_branch_shell() -> None:
-    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD
     pid = _BRANCH_PID
     fd = _BRANCH_FD
 
@@ -229,6 +233,8 @@ def _reset_branch_shell() -> None:
     _BRANCH_FD = None
     _BRANCH_MARKER = None
     _BRANCH_SESSION_LABEL = None
+    _BRANCH_SESSION_NAME = None
+    _BRANCH_CWD = None
 
     if pid is not None:
         try:
@@ -245,6 +251,106 @@ def _reset_branch_shell() -> None:
             os.close(fd)
         except OSError:
             pass
+
+
+def _branch_session_name(cwd: str, label: Optional[str]) -> str:
+    cwd_id = _interactive_cwd_identifier(cwd)
+    clean_label = str(label or "interactive").strip() or "interactive"
+    clean_label = re.sub(r"[^A-Za-z0-9_.@-]+", "_", clean_label).strip("_") or "interactive"
+    return f"{cwd_id}::{clean_label}"
+
+
+def _detach_branch_shell(session_name: Optional[str] = None, cwd: Optional[str] = None) -> Optional[str]:
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD
+
+    if not _shell_alive(_BRANCH_PID) or _BRANCH_FD is None:
+        _reset_branch_shell()
+        return None
+
+    name = session_name or _BRANCH_SESSION_NAME or _branch_session_name(
+        cwd or _BRANCH_CWD or _START_CWD,
+        _BRANCH_SESSION_LABEL,
+    )
+
+    _SAVED_BRANCHES[name] = {
+        "pid": _BRANCH_PID,
+        "fd": _BRANCH_FD,
+        "marker": _BRANCH_MARKER or f"__BRANCH_DONE_{time.time_ns()}__",
+        "session_label": _BRANCH_SESSION_LABEL,
+        "session_name": name,
+        "cwd": cwd or _BRANCH_CWD or _START_CWD,
+        "saved_at": time.time(),
+    }
+
+    _BRANCH_PID = None
+    _BRANCH_FD = None
+    _BRANCH_MARKER = None
+    _BRANCH_SESSION_LABEL = None
+    _BRANCH_SESSION_NAME = None
+    _BRANCH_CWD = None
+    return name
+
+
+def _restore_branch_shell(session_name: str) -> bool:
+    global _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD, _INTERACTIVE_MODE
+
+    saved = _SAVED_BRANCHES.get(session_name)
+    if not saved:
+        return False
+
+    pid = saved.get("pid")
+    fd = saved.get("fd")
+    if not _shell_alive(pid) or fd is None:
+        _kill_saved_branch(session_name)
+        return False
+
+    if _shell_alive(_BRANCH_PID):
+        _detach_branch_shell()
+
+    _BRANCH_PID = pid
+    _BRANCH_FD = fd
+    _BRANCH_MARKER = saved.get("marker") or f"__BRANCH_DONE_{time.time_ns()}__"
+    _BRANCH_SESSION_LABEL = saved.get("session_label")
+    _BRANCH_SESSION_NAME = session_name
+    _BRANCH_CWD = saved.get("cwd") or _START_CWD
+    _INTERACTIVE_MODE = True
+    _SAVED_BRANCHES.pop(session_name, None)
+    return True
+
+
+def _kill_saved_branch(session_name: str) -> None:
+    saved = _SAVED_BRANCHES.pop(session_name, None)
+    if not saved:
+        return
+
+    pid = saved.get("pid")
+    fd = saved.get("fd")
+
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _saved_branch_alive(session_name: str) -> bool:
+    saved = _SAVED_BRANCHES.get(session_name)
+    if not saved:
+        return False
+    if _shell_alive(saved.get("pid")) and saved.get("fd") is not None:
+        return True
+    _kill_saved_branch(session_name)
+    return False
 
 
 def _escape_single_quotes(s: str) -> str:
@@ -522,6 +628,84 @@ def _undecorate_cwd(cwd: str) -> str:
             break
         result = rest.strip()
     return result
+
+
+def _program_state_flag(program_state: Dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = program_state.get(key)
+        if isinstance(value, str):
+            if value.strip().lower() in ("1", "true", "yes", "on", "fresh", "scratch"):
+                return True
+            continue
+        if bool(value):
+            return True
+    return False
+
+
+def _interactive_cwd_identifier(cwd: str) -> str:
+    cleaned = _undecorate_cwd(str(cwd or "").strip())
+    return cleaned or _START_CWD
+
+
+def _get_where_left_off_summary(program_state: Dict[str, Any], cwd_id: str) -> Optional[Dict[str, Any]]:
+    summaries = program_state.get("interactive_where_left_off")
+    if not isinstance(summaries, dict):
+        return None
+
+    summary = summaries.get(cwd_id)
+    if isinstance(summary, dict):
+        return summary
+    return None
+
+
+def _format_list_field(value: Any) -> str:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return "; ".join(parts)
+    return str(value).strip()
+
+
+def _format_where_left_off_summary(summary: Dict[str, Any]) -> str:
+    lines = [
+        "[where left off available]",
+        f"Summary: {str(summary.get('summary', '')).strip()}",
+    ]
+
+    completed = _format_list_field(summary.get("completed", []))
+    remaining = _format_list_field(summary.get("remaining", []))
+    next_input = str(summary.get("next_suggested_input", "")).strip()
+    risk_notes = _format_list_field(summary.get("risk_notes", []))
+
+    if completed:
+        lines.append(f"Completed: {completed}")
+    if remaining:
+        lines.append(f"Remaining: {remaining}")
+    if next_input:
+        lines.append(f"Suggested next input: {next_input}")
+    if risk_notes:
+        lines.append(f"Risk notes: {risk_notes}")
+
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _prepend_where_left_off_output(output: str, summary: Dict[str, Any]) -> str:
+    prefix = _format_where_left_off_summary(summary)
+    if not prefix:
+        return output
+    if output:
+        return f"{prefix}\n\n{output}"
+    return prefix
+
+
+def _saved_branch_output(session_name: str, summary: Optional[Dict[str, Any]]) -> str:
+    lines = [
+        f"[saved interactive shell session available: {session_name}]",
+        "Waiting for the resume decider to choose resume or fresh start.",
+    ]
+    if summary:
+        lines.append("")
+        lines.append(_format_where_left_off_summary(summary))
+    return "\n".join(lines).strip()
 
 
 def _extract_path_candidate(text: str) -> Optional[str]:
@@ -822,7 +1006,7 @@ def run_shell(
     tail_lines: Optional[int] = None,
     cwd: Optional[str] = None,
 ):
-    global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
+    global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD
 
     with _LOCK:
         _start_shell()
@@ -833,17 +1017,20 @@ def run_shell(
         if continuing_interactive:
             # User-requested branch termination keyword.
             if isinstance(command, str) and command.strip().lower() == "done":
-                _reset_branch_shell()
+                detached_name = _detach_branch_shell(cwd=cwd or _BRANCH_CWD or _START_CWD)
                 _INTERACTIVE_MODE = False
 
                 return {
-                    "output": "[interactive branch terminated]",
+                    "output": f"[interactive branch detached: {detached_name}]" if detached_name else "[interactive branch ended]",
                     "interactive_mode": False,
                     "completed": True,
-                    "branch_mode": False,
+                    "branch_mode": True,
                     "session_label": None,
-                    "cwd_raw": None,
+                    "session_name": detached_name,
+                    "cwd_raw": cwd or _START_CWD,
                     "cwd_display": None,
+                    "continuing_interactive": False,
+                    "detached": bool(detached_name),
                 }
             SPECIAL_KEYS = {
                 "SIGINT": b"\x03",
@@ -872,6 +1059,7 @@ def run_shell(
             completed = bool(read_result["completed"])
             interactive_mode = bool(read_result["interactive_mode"])
 
+            session_name = _BRANCH_SESSION_NAME
             if completed:
                 _reset_branch_shell()
                 _INTERACTIVE_MODE = False
@@ -884,8 +1072,10 @@ def run_shell(
                 "completed": completed,
                 "branch_mode": True,
                 "session_label": _BRANCH_SESSION_LABEL,
-                "cwd_raw": None,
-                "cwd_display": _decorate_cwd(cwd or _START_CWD, _BRANCH_SESSION_LABEL),
+                "session_name": session_name,
+                "cwd_raw": _BRANCH_CWD,
+                "cwd_display": _decorate_cwd(_BRANCH_CWD or cwd or _START_CWD, _BRANCH_SESSION_LABEL),
+                "continuing_interactive": True,
             }
 
         if sudo:
@@ -978,6 +1168,7 @@ def run_shell(
                     "session_label": None,
                     "cwd_raw": None,
                     "cwd_display": None,
+                    "continuing_interactive": False,
                 }
 
             escaped = _escape_single_quotes(rest_command)
@@ -1015,6 +1206,7 @@ def run_shell(
                 "session_label": None,
                 "cwd_raw": None,
                 "cwd_display": None,
+                "continuing_interactive": False,
             }
 
         use_branch = _should_use_branch(command)
@@ -1022,6 +1214,8 @@ def run_shell(
         if use_branch:
             branch_cwd = _undecorate_cwd(cwd) if cwd else _START_CWD
             _start_branch_shell(branch_cwd)
+            launch_label = _fallback_session_label(command)
+            _BRANCH_SESSION_NAME = _branch_session_name(branch_cwd, launch_label)
 
             for line in command.splitlines():
                 os.write(_BRANCH_FD, (line + "\n").encode("utf-8"))
@@ -1045,6 +1239,7 @@ def run_shell(
 
             branch_label = _branch_session_label(command, output)
             _BRANCH_SESSION_LABEL = branch_label
+            session_name = _BRANCH_SESSION_NAME
 
             if completed:
                 _reset_branch_shell()
@@ -1058,8 +1253,10 @@ def run_shell(
                 "completed": completed,
                 "branch_mode": True,
                 "session_label": branch_label,
+                "session_name": session_name,
                 "cwd_raw": branch_cwd,
                 "cwd_display": _decorate_cwd(branch_cwd, branch_label),
+                "continuing_interactive": False,
             }
 
         _COUNTER += 1
@@ -1101,13 +1298,16 @@ def run_shell(
             "session_label": None,
             "cwd_raw": cwd_after if completed else None,
             "cwd_display": None,
+            "continuing_interactive": False,
         }
 
 
 def shell_reset():
-    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL
+    global _SHELL_PID, _SHELL_FD, _INTERACTIVE_MODE, _BRANCH_PID, _BRANCH_FD, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD
 
     _reset_branch_shell()
+    for session_name in list(_SAVED_BRANCHES.keys()):
+        _kill_saved_branch(session_name)
 
     pid = _SHELL_PID
     fd = _SHELL_FD
@@ -1116,6 +1316,8 @@ def shell_reset():
     _SHELL_FD = None
     _INTERACTIVE_MODE = False
     _BRANCH_SESSION_LABEL = None
+    _BRANCH_SESSION_NAME = None
+    _BRANCH_CWD = None
 
     if pid is not None:
         try:
@@ -1137,16 +1339,102 @@ def shell_reset():
 
 def shell(command, memory, local_state, program_state):
     current_cwd = _undecorate_cwd(str(local_state.get("CURRENT_WORKING_DIRECTORY", "")).strip())
+    command_text = str(command or "")
 
-    result = run_shell(command, stream=True, truncate=True, cwd=current_cwd)
+    pending_session = str(program_state.get("SHELL_PENDING_RESUME_SESSION") or "").strip()
+    pending_launch = str(program_state.get("SHELL_PENDING_LAUNCH_COMMAND") or "").strip()
+
+    if command_text.strip() == "__PIGION_SHELL_RESUME_SAVED__":
+        if pending_session and _restore_branch_shell(pending_session):
+            program_state["SHELL_RESUMED_SESSION"] = pending_session
+            program_state.pop("SHELL_PENDING_RESUME_SESSION", None)
+            result = run_shell("", stream=True, truncate=True, cwd=current_cwd)
+        else:
+            result = {
+                "output": f"[saved interactive branch unavailable: {pending_session}]",
+                "interactive_mode": False,
+                "completed": True,
+                "branch_mode": False,
+                "session_label": None,
+                "session_name": pending_session or None,
+                "cwd_raw": current_cwd,
+                "cwd_display": None,
+                "continuing_interactive": False,
+            }
+    elif command_text.strip() == "__PIGION_SHELL_START_FRESH__":
+        if pending_session:
+            _kill_saved_branch(pending_session)
+        program_state.pop("SHELL_PENDING_RESUME_SESSION", None)
+        program_state.pop("SHELL_PENDING_RESUME_CWD", None)
+        launch_command = pending_launch or command_text
+        program_state.pop("SHELL_PENDING_LAUNCH_COMMAND", None)
+        result = run_shell(launch_command, stream=True, truncate=True, cwd=current_cwd)
+    elif pending_session and not _INTERACTIVE_MODE:
+        decision = program_state.get("interactive_resume_decision", {})
+        continue_resume = False
+        if isinstance(decision, dict):
+            value = decision.get("continue_where_left_off", False)
+            if isinstance(value, str):
+                continue_resume = value.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                continue_resume = bool(value)
+
+        if continue_resume and _restore_branch_shell(pending_session):
+            program_state["SHELL_RESUMED_SESSION"] = pending_session
+            program_state.pop("SHELL_PENDING_RESUME_SESSION", None)
+            result = run_shell(command_text, stream=True, truncate=True, cwd=current_cwd)
+        else:
+            _kill_saved_branch(pending_session)
+            program_state.pop("SHELL_PENDING_RESUME_SESSION", None)
+            program_state.pop("SHELL_PENDING_RESUME_CWD", None)
+            launch_command = pending_launch or command_text
+            program_state.pop("SHELL_PENDING_LAUNCH_COMMAND", None)
+            result = run_shell(launch_command, stream=True, truncate=True, cwd=current_cwd)
+    else:
+        use_branch = _should_use_branch(command_text)
+        branch_cwd = _interactive_cwd_identifier(current_cwd or _START_CWD)
+        launch_label = _fallback_session_label(command_text) if use_branch else None
+        session_name = _branch_session_name(branch_cwd, launch_label) if launch_label else ""
+        forced_fresh = _program_state_flag(
+            program_state,
+            "force_interactive_start_fresh",
+            "INTERACTIVE_FORCE_START_FRESH",
+            "interactive_start_fresh",
+        )
+
+        if use_branch and session_name and _saved_branch_alive(session_name) and not forced_fresh:
+            summary = _get_where_left_off_summary(program_state, branch_cwd)
+            program_state["SHELL_PENDING_RESUME_SESSION"] = session_name
+            program_state["SHELL_PENDING_RESUME_CWD"] = branch_cwd
+            program_state["SHELL_PENDING_LAUNCH_COMMAND"] = command_text
+            program_state["SHELL_SAVED_BRANCH_AVAILABLE"] = True
+            result = {
+                "output": _saved_branch_output(session_name, summary),
+                "interactive_mode": True,
+                "completed": False,
+                "branch_mode": True,
+                "session_label": launch_label,
+                "session_name": session_name,
+                "cwd_raw": branch_cwd,
+                "cwd_display": _decorate_cwd(branch_cwd, launch_label),
+                "continuing_interactive": False,
+                "pending_saved_branch": True,
+            }
+        else:
+            if use_branch and session_name and forced_fresh:
+                _kill_saved_branch(session_name)
+                program_state["SHELL_SAVED_BRANCH_FORCED_FRESH"] = session_name
+            result = run_shell(command_text, stream=True, truncate=True, cwd=current_cwd)
 
     output = str(result.get("output", ""))
     interactive_mode = bool(result.get("interactive_mode", False))
     completed = bool(result.get("completed", True))
     branch_mode = bool(result.get("branch_mode", False))
     session_label = result.get("session_label") or None
+    session_name = result.get("session_name") or None
     cwd_raw = result.get("cwd_raw") or None
     cwd_display = result.get("cwd_display") or None
+    continuing_interactive = bool(result.get("continuing_interactive", False))
 
     # Keep local_state minimal: only CURRENT_WORKING_DIRECTORY.
     if branch_mode and interactive_mode:
@@ -1180,12 +1468,52 @@ def shell(command, memory, local_state, program_state):
     elif branch_mode and interactive_mode:
         program_state["SESSION_LABEL"] = _fallback_session_label(command)
 
+    if session_name:
+        program_state["SHELL_INTERACTIVE_SESSION_NAME"] = session_name
+
     if branch_mode and interactive_mode:
         program_state["BRANCH_WORKING_DIRECTORY"] = cwd_raw or _undecorate_cwd(local_state["CURRENT_WORKING_DIRECTORY"])
         program_state["CURRENT_WORKING_DIRECTORY"] = local_state["CURRENT_WORKING_DIRECTORY"]
     else:
         program_state["BRANCH_WORKING_DIRECTORY"] = None
         program_state["CURRENT_WORKING_DIRECTORY"] = local_state["CURRENT_WORKING_DIRECTORY"]
+
+    if branch_mode and interactive_mode and not continuing_interactive:
+        cwd_id = _interactive_cwd_identifier(program_state.get("BRANCH_WORKING_DIRECTORY") or current_cwd)
+        forced_fresh = _program_state_flag(
+            program_state,
+            "force_interactive_start_fresh",
+            "INTERACTIVE_FORCE_START_FRESH",
+            "interactive_start_fresh",
+        )
+        summary = None if forced_fresh else _get_where_left_off_summary(program_state, cwd_id)
+
+        program_state["SHELL_WHERE_LEFT_OFF_CWD"] = cwd_id
+        program_state["SHELL_WHERE_LEFT_OFF_AVAILABLE"] = bool(summary)
+        program_state["SHELL_WHERE_LEFT_OFF_FORCED_FRESH"] = forced_fresh
+
+        if summary:
+            program_state["SHELL_WHERE_LEFT_OFF_SUMMARY"] = summary
+            output = _prepend_where_left_off_output(output, summary)
+            local_state["last_tool_output"] = output
+        else:
+            program_state.pop("SHELL_WHERE_LEFT_OFF_SUMMARY", None)
+
+    if result.get("detached"):
+        saved_sessions = program_state.setdefault("SHELL_SAVED_INTERACTIVE_SESSIONS", {})
+        if isinstance(saved_sessions, dict) and session_name:
+            saved_sessions[session_name] = {
+                "cwd": cwd_raw or current_cwd,
+                "session_label": session_label,
+                "saved_at": time.time(),
+            }
+        program_state["SHELL_LAST_DETACHED_SESSION"] = session_name
+
+    if result.get("pending_saved_branch"):
+        program_state["SHELL_PENDING_SAVED_BRANCH"] = True
+    elif not program_state.get("SHELL_PENDING_RESUME_SESSION"):
+        program_state["SHELL_PENDING_SAVED_BRANCH"] = False
+
     print(local_state["CURRENT_WORKING_DIRECTORY"])
     return {
         "ok": True,
