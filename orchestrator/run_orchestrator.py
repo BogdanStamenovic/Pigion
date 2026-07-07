@@ -43,7 +43,7 @@ SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
 MEMORY_VALS: Dict[str, Any] = {}
-USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "True")).lower() in ("1", "true", "yes")
+USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "False")).lower() in ("1", "true", "yes")
 # =========================
 # ENV LOADERS
 # =========================
@@ -366,8 +366,18 @@ CORE EXECUTION RULES:
 - If no suitable registered device tool exists, report that routing is blocked.
 - For each action, choose exactly one matching device tool and pass the needed goal or message as the tool input.
 - The expected internal reasoning is simple: "yea, I should call this device tool for this goal."
-- Registered devices do not share your context, memory, action history, or information from other devices.
+- Registered devices do not share your context, memory, action history, plan, or information from other devices.
+- A registered device knows only the exact text you put after its tool name in the current action.
 - Treat yourself as the middle man between devices.
+- Device instructions must be self-contained and specific. Include the target device identity, the exact local task,
+  relevant paths/files/URLs/values, and any information learned from previous device outputs.
+- Do not send vague inherited wording such as "measure temperature" when the intended task is local to that device.
+  Say "measure the temperature of yourself/this device" or otherwise name the exact target.
+- Group work by device whenever possible. If one device can complete several independent parts locally, send one
+  complete self-contained goal to that device instead of bouncing between devices.
+- Preserve dependency order. If device B can do some local work now but later needs information from device A, route
+  B's independent work first, then A produces the needed information, then B receives a new explicit goal containing
+  that information.
 - If a goal requires communication between two or more devices, broker that communication yourself:
   first ask device A for the needed information, wait for that result in action history, then include the relevant
   information explicitly in the goal you send to device B.
@@ -443,10 +453,18 @@ Rules:
 - Make implicit assumptions explicit.
 - Make locations, files, directories, repositories, URLs, resources, and targets explicit when mentioned.
 - Clarify ambiguous references when possible from context.
-- When a goal involves more than one device, favor grouping and ordering the work by what each single device can do locally.
-- If one device must produce information for another device, rewrite the goal so the producing device first creates, saves, or exposes that information in a concrete way, and then the consuming device retrieves or uses it.
+- When a goal involves more than one device, make the intended device targets explicit.
+- Favor grouping and ordering the work by what each single device can do locally.
+- If device B can do independent work now but later needs information from device A, state that device B should do
+  its independent work first, then device A should produce the needed information, then device B should continue with
+  that explicit information.
+- If one device must produce information for another device, rewrite the goal so the producing device first creates,
+  saves, exposes, or returns that information in a concrete way, and then the consuming device receives or retrieves
+  the exact information needed.
 - Do not preserve the user's original action order if it splits apart actions that can be completed together on the same device.
 - Do not make devices depend on hidden orchestrator context or on another device's private state; any cross-device handoff should have an explicit shared artifact, saved file, server endpoint, or message content.
+- Avoid ambiguous commands. For example, rewrite "measure temperature of device B" as "on device B, measure the
+  temperature of device B itself" unless the user clearly means outdoor/weather temperature.
 - Keep the result concise.
 - The output should still read like a goal to be sent to a watchdog device, not like documentation or a specification.
 - Return plain text only.
@@ -470,8 +488,8 @@ Get the temperature of the rpi device and make the kali device write that temper
 Output:
 On the rpi device, get the current temperature, save that temperature, and set up a simple server endpoint that exposes the saved temperature. Then on the kali device, retrieve the temperature from the rpi device's server endpoint and save it to the kali device's home directory.
 
-The output should not contatin implications. Everything implied should be explicitly stated.
-For example. If the user says "Sort the files in this folder", you should NOT ommit the directions to change the folder. Nothing should be implied!
+The output should not contain implications. Everything implied should be explicitly stated.
+For example. If the user says "Sort the files in this folder", you should NOT omit the directions to change the folder. Nothing should be implied!
     """
 
     prompt = f"User goal:\n{goal}\n\nReturn the formalized task specification as plain text only."
@@ -543,8 +561,15 @@ RULES:
 - 1 to 3 steps maximum.
 - Do NOT create subplans.
 - Do NOT describe doing the device work yourself.
+- Prefer one step per contiguous block of work on the same device.
+- Group independent tasks for the same device into the same step when they can be completed without waiting for another device.
+- If a device has some work it can do before it later depends on another device, split that device's work into
+  "before dependency" and "after dependency" steps around the producing device's step.
 - If the goal needs information from one device before another device can act, include separate broker steps:
   ask the first device for the information, then send that information explicitly to the second device.
+- Plan steps must make cross-device handoffs explicit. A consuming-device step should say what information it needs
+  from the previous device output.
+- Do not make a step depend on hidden orchestrator context or a device's private memory.
 - Do NOT include extra fields.
 """
     result = call_llm(prompt, system)
@@ -612,10 +637,19 @@ Return ONLY:
 RULES:
 - Use only a device tool listed in AVAILABLE_TOOLS.
 - Tool names must use the registered device name, not a UUID.
-- Pass the original user goal or the formalized goal as the device tool input.
+- Do not blindly pass the original user goal or full formalized goal if only part of it belongs to this device.
+- Write the device input as a self-contained instruction for the selected device only.
+- Include the exact device-local task, the intended target, relevant paths/files/URLs/values, success criteria, and
+  any constraints the device needs in order to finish without seeing your plan.
+- If the task is about the selected device itself, say that explicitly. Example: "measure the temperature of yourself
+  / this device" instead of "measure temperature".
+- If multiple remaining tasks can be done by this same device before another device is needed, combine them in this
+  one device goal.
 - If this is a cross-device handoff, pass only the current device's task plus all relevant information already gathered from previous device outputs.
 - Do not assume devices share context; include the transferred information explicitly in the next device's goal.
 - If the needed information is not yet available, call the device that has that information before calling the device that needs it.
+- If the selected device can do useful independent work before waiting for another device, send only that independent
+  work now and leave the dependency-bound continuation for a later action.
 - The correct routing thought is: yea, I should call this device tool.
 - If CURRENT STEP is already complete, return status "done" and next_action "".
 - If no device is registered or no listed device matches, return status "fail" and next_action "".
@@ -677,9 +711,12 @@ Return ONLY:
 }}
 
 RULES:
-- Mark "done" if the tool output says a job was queued for a device.
+- Mark "done" if the current routing step was queued to the correct registered device with a self-contained,
+  specific instruction.
 - Mark "ongoing" if another registered device call is still needed, including when the queued device output contains information that must be forwarded to another device.
-- Mark "fail" if no job was queued, the action used an unregistered tool, or the action tried to do device work locally.
+- Mark "ongoing" if the current device did useful grouped work but a later dependency handoff is still required.
+- Mark "fail" if no job was queued, the action used an unregistered tool, the action tried to do device work locally,
+  or the device input was too vague for that device to know the intended target/context.
 """
     result = call_llm(prompt, system)
     result.setdefault("status", "fail")
@@ -736,8 +773,16 @@ Return ONLY:
 }}
 
 RULES:
-- Use "retry" if the step can still be done with a different next action.
-- Use "replace_step" only if the CURRENT STEP description should be rewritten.
+- Use "retry" if the step can still be done by sending a better prompt to a registered device.
+- When a device failed because the instruction was vague, missing context, missing dependency data, or aimed at the
+  wrong target, use prompt engineering: rewrite retry_action as a more specific self-contained device goal.
+- A retry_action must include all context the selected device needs, because the device cannot see orchestrator
+  context, previous attempts, action history, or another device's private state unless you include it explicitly.
+- Keep device grouping in the retry. If the same device can do multiple local fixes or checks, include them together.
+- If the failure shows that another device must provide information first, use "replace_step" or retry with the
+  producer device rather than asking the blocked device to guess.
+- Use "replace_step" only if the CURRENT STEP description should be rewritten to improve grouping, dependency order,
+  or missing context.
 - Use "skip_step" only if it is truly unnecessary or already effectively complete.
 - Use "abort_goal" only if the goal cannot continue safely.
 - Prefer alternatives that resemble successful past recoveries when relevant.
@@ -782,6 +827,11 @@ RULES:
 - Evaluate the status of ALL STEPS.
 - If a step is complete, mark it as "done".
 - If a step is not complete, mark it as "todo".
+- A step is complete only when the needed registered device routing for that step has happened with enough explicit
+  context for that device to act alone.
+- Do not mark a consuming-device handoff done unless the action sent the exact information from the producing device
+  in the consuming device's goal.
+- If a device still needs context from another device, mark the consuming-device step "todo".
 - Use the exact plan step text as the key.
 - Do not invent, remove, or rename steps."""
     prompt = f"""
@@ -917,8 +967,13 @@ RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
 RULES:
--Do as much as you can in THIS INTERACTIVE MODE session for the PLAN in ORDER.
--When YOU DID AS MUCH AS YOU CAN, exit interactive mode by typing 'done'.
+- Do as much as you can in THIS INTERACTIVE MODE session for the PLAN in ORDER.
+- Keep each input focused on the current tool/device session.
+- The tool/device only knows the current INPUT plus whatever the session itself has already shown under OUTPUT.
+- Include all required context in the INPUT; do not rely on hidden orchestrator context.
+- If the tool/device failed because the instruction was unclear or missing context, rewrite the next INPUT to be more
+  specific and include the missing details.
+- When YOU DID AS MUCH AS YOU CAN, exit interactive mode by typing 'done'.
 """
         prompt = f"""
 INTERACTIVE MODE active for tool: {tool}
@@ -936,6 +991,8 @@ RULES:
 - Do NOT try to perform more actions using \\n.
 - All the text you write under INPUT: will be sent directly to the tool {tool} for execution.
 - The output will be displayed under OUTPUT:.
+- Make INPUT self-contained and specific enough for the receiving tool/device to know the exact target, local task,
+  files/paths/URLs/values, and success criteria.
 - To EXIT interactive mode, finish the program cleanly or type done into the INPUT:.
 
 OUTPUT:
