@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import io
+import os
 import re
 import secrets
 import shlex
@@ -47,6 +48,8 @@ from server.web_store import (
 
 
 app = FastAPI(title="Pigion Orchestrator")
+UNINSTALL_JOB_KIND = "uninstall"
+UNINSTALL_JOB_GOAL = "__pigion_uninstall__"
 
 
 def form_data(body: bytes) -> dict[str, str]:
@@ -217,18 +220,59 @@ def remove_orchestrator_tool(device: dict[str, Any]) -> None:
     td_path.write_text(("\n".join(renumbered) + "\n") if renumbered else "", encoding="utf-8")
 
 
-def run_cleanup_command(command: list[str], messages: list[str]) -> None:
-    result = subprocess.run(command, text=True, capture_output=True)
+def env_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        try:
+            parts = shlex.split(raw_value, posix=True)
+            value = parts[0] if parts else ""
+        except ValueError:
+            value = raw_value.strip().strip('"').strip("'")
+        values[key] = value
+    return values
+
+
+def cleanup_sudo_password() -> str:
+    env_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
+    if env_password:
+        return env_password
+    values = env_values(PROJECT_ROOT / ".env")
+    return values.get("SUDO_PASSWORD") or values.get("TEST_SUDO_PASSWORD") or ""
+
+
+def run_cleanup_command(
+    command: list[str],
+    messages: list[str],
+    *,
+    sudo: bool = False,
+    sudo_password: str = "",
+) -> None:
+    full_command = list(command)
+    input_text = None
+    if sudo and os.geteuid() != 0:
+        if sudo_password:
+            full_command = ["sudo", "-S", "-p", "", *command]
+            input_text = sudo_password + "\n"
+        else:
+            full_command = ["sudo", "-n", *command]
+    result = subprocess.run(full_command, input=input_text, text=True, capture_output=True)
     detail = (result.stderr or result.stdout).strip()
     if result.returncode == 0:
-        messages.append(f"ok: {' '.join(command)}")
+        messages.append(f"ok: {' '.join(full_command)}")
     elif detail:
-        messages.append(f"failed: {' '.join(command)} -> {detail}")
+        messages.append(f"failed: {' '.join(full_command)} -> {detail}")
     else:
-        messages.append(f"failed: {' '.join(command)}")
+        messages.append(f"failed: {' '.join(full_command)}")
 
 
-def remove_path_best_effort(path: Path, messages: list[str]) -> None:
+def remove_path_best_effort(path: Path, messages: list[str], sudo_password: str = "") -> None:
     if not path.exists():
         return
     try:
@@ -238,7 +282,7 @@ def remove_path_best_effort(path: Path, messages: list[str]) -> None:
             path.unlink()
         messages.append(f"removed: {path}")
     except PermissionError:
-        run_cleanup_command(["sudo", "-n", "rm", "-rf", str(path)], messages)
+        run_cleanup_command(["rm", "-rf", str(path)], messages, sudo=True, sudo_password=sudo_password)
 
 
 def remove_local_install(device: dict[str, Any]) -> list[str]:
@@ -247,27 +291,95 @@ def remove_local_install(device: dict[str, Any]) -> list[str]:
     if not device_name:
         return messages
 
+    sudo_password = cleanup_sudo_password()
     service_name = f"pigion_{device_name}.service"
-    run_cleanup_command(["systemctl", "disable", "--now", service_name], messages)
-    remove_path_best_effort(Path("/etc/systemd/system") / service_name, messages)
-    run_cleanup_command(["systemctl", "daemon-reload"], messages)
+    run_cleanup_command(["systemctl", "disable", "--now", service_name], messages, sudo=True, sudo_password=sudo_password)
+    remove_path_best_effort(Path("/etc/systemd/system") / service_name, messages, sudo_password)
+    run_cleanup_command(["systemctl", "daemon-reload"], messages, sudo=True, sudo_password=sudo_password)
 
     install_root = Path("/opt/pigion")
-    remove_path_best_effort(install_root / device_name, messages)
+    remove_path_best_effort(install_root / device_name, messages, sudo_password)
     # Older test registrations used capitalization variants; remove exact case-insensitive matches.
     if install_root.exists():
         for child in install_root.iterdir():
             if child.name.lower() == device_name.lower():
-                remove_path_best_effort(child, messages)
+                remove_path_best_effort(child, messages, sudo_password)
         try:
             if not any(install_root.iterdir()):
-                remove_path_best_effort(install_root, messages)
+                remove_path_best_effort(install_root, messages, sudo_password)
         except PermissionError:
             pass
     return messages
 
 
-def remove_registered_device(device_uuid: str) -> list[str]:
+def existing_uninstall_job(device_uuid: str) -> dict[str, Any] | None:
+    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
+    jobs = sorted(
+        jobs_doc.get("jobs", {}).values(),
+        key=lambda item: item.get("created_at", ""),
+        reverse=True,
+    )
+    for job in jobs:
+        if (
+            job.get("device_uuid") == device_uuid
+            and job.get("kind") == UNINSTALL_JOB_KIND
+            and job.get("status") in {"waiting", "running"}
+        ):
+            return job
+    return None
+
+
+def mark_device_removal_pending(device_uuid: str, job: dict[str, Any]) -> None:
+    devices_doc = read_json(DEVICES_PATH, {"devices": {}})
+    device = devices_doc.get("devices", {}).get(device_uuid)
+    if not device:
+        return
+    device["removal_pending"] = True
+    device["removal_job_id"] = job.get("id")
+    device["removal_requested_at"] = utc_now()
+    write_json(DEVICES_PATH, devices_doc)
+
+
+def queue_remote_uninstall(device_uuid: str) -> dict[str, Any]:
+    existing = existing_uninstall_job(device_uuid)
+    if existing:
+        return existing
+    job = create_job(
+        device_uuid,
+        UNINSTALL_JOB_GOAL,
+        source="remove_registered_device",
+        kind=UNINSTALL_JOB_KIND,
+    )
+    mark_device_removal_pending(device_uuid, job)
+    return job
+
+
+def wait_for_uninstall_ack(job_id: str, timeout_seconds: float) -> dict[str, Any] | None:
+    import time
+
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
+        job = jobs_doc.get("jobs", {}).get(job_id)
+        if not job:
+            devices_doc = read_json(DEVICES_PATH, {"devices": {}})
+            if not any(
+                device.get("removal_job_id") == job_id
+                for device in devices_doc.get("devices", {}).values()
+            ):
+                return {
+                    "id": job_id,
+                    "status": "finished",
+                    "result": "remote uninstall acknowledged and registry finalized",
+                }
+            return None
+        if job.get("status") in {"finished", "failed"}:
+            return job
+        time.sleep(0.5)
+    return read_json(JOBS_PATH, {"jobs": {}}).get("jobs", {}).get(job_id)
+
+
+def finalize_registered_device_removal(device_uuid: str) -> list[str]:
     messages: list[str] = []
     devices_doc = read_json(DEVICES_PATH, {"devices": {}})
     device = devices_doc.get("devices", {}).pop(device_uuid, None)
@@ -296,6 +408,36 @@ def remove_registered_device(device_uuid: str) -> list[str]:
             remove_path_best_effort(package_dir, messages)
 
     messages.extend(remove_local_install(device))
+    return messages
+
+
+def remove_registered_device(device_uuid: str) -> list[str]:
+    devices_doc = read_json(DEVICES_PATH, {"devices": {}})
+    device = devices_doc.get("devices", {}).get(device_uuid)
+    if not device:
+        return ["Device was already absent from server registry."]
+
+    messages: list[str] = []
+    job = queue_remote_uninstall(device_uuid)
+    messages.append(f"queued remote uninstall job: {job['id']}")
+    timeout_seconds = float(os.environ.get("PIGION_REMOVE_UNINSTALL_TIMEOUT", "45"))
+    finished_job = wait_for_uninstall_ack(str(job["id"]), timeout_seconds)
+    if not finished_job or finished_job.get("status") not in {"finished", "failed"}:
+        messages.append(
+            "remote uninstall is still pending; device remains registered so it can receive the uninstall command"
+        )
+        return messages
+    if finished_job.get("status") != "finished":
+        messages.append(f"remote uninstall failed: {finished_job.get('error') or finished_job.get('result')}")
+        messages.append("device remains registered so you can retry removal")
+        return messages
+
+    messages.append(str(finished_job.get("result") or "remote uninstall acknowledged"))
+    devices_doc = read_json(DEVICES_PATH, {"devices": {}})
+    if device_uuid not in devices_doc.get("devices", {}):
+        messages.append("server registry cleanup is already finalized")
+        return messages
+    messages.extend(finalize_registered_device_removal(device_uuid))
     return messages
 
 
@@ -328,10 +470,12 @@ def write_device_client(device: dict[str, Any]) -> str:
 
         import importlib
         import json
+        import subprocess
         import time
         import traceback
         import urllib.error
         import urllib.request
+        from pathlib import Path
         from typing import Any
 
 
@@ -370,6 +514,21 @@ def write_device_client(device: dict[str, Any]) -> str:
             request_json("POST", f"{{SERVER_URL}}/api/device/{{DEVICE_UUID}}/logs", payload)
 
 
+        def start_uninstall() -> str:
+            script = Path(__file__).resolve().parent / "uninstall.sh"
+            if not script.exists():
+                raise RuntimeError(f"Uninstall script not found: {{script}}")
+            subprocess.Popen(
+                ["bash", str(script)],
+                cwd=str(script.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return f"Started remote uninstall script: {{script}}"
+
+
         def main() -> None:
             while True:
                 try:
@@ -387,6 +546,15 @@ def write_device_client(device: dict[str, Any]) -> str:
                         {{"progress": "running", "log": "Sent goal to watchdog"}},
                     )
                     try:
+                        if job.get("kind") == {UNINSTALL_JOB_KIND!r} or job.get("goal") == {UNINSTALL_JOB_GOAL!r}:
+                            result = start_uninstall()
+                            request_json(
+                                "POST",
+                                f"{{SERVER_URL}}/api/jobs/{{job_id}}/finished",
+                                {{"success": True, "result": result, "log": "Watchdog started uninstall"}},
+                            )
+                            time.sleep(2)
+                            continue
                         run_agent = load_runner()
                         result = run_agent(job["goal"])
                         request_json(
@@ -435,6 +603,12 @@ def write_install_script(device: dict[str, Any]) -> str:
         INSTALL_ROOT="${{PIGION_INSTALL_ROOT:-/opt/pigion}}"
         INSTALL_DIR="$INSTALL_ROOT/$DEVICE_NAME"
         SERVICE_NAME={shlex.quote(unit_name)}
+        SERVICE_USER="${{PIGION_SERVICE_USER:-${{SUDO_USER:-$(id -un)}}}}"
+        SERVICE_GROUP="${{PIGION_SERVICE_GROUP:-$(id -gn "$SERVICE_USER")}}"
+        SERVICE_HOME="${{PIGION_SERVICE_HOME:-$(getent passwd "$SERVICE_USER" | cut -d: -f6)}}"
+        if [ -z "$SERVICE_HOME" ]; then
+          SERVICE_HOME="$(eval echo "~$SERVICE_USER")"
+        fi
         PYTHON_BIN="${{PYTHON_BIN:-python3}}"
         VENV_DIR="$INSTALL_DIR/.venv"
         VENV_PYTHON="$VENV_DIR/bin/python"
@@ -484,6 +658,62 @@ TEST_SUDO_PASSWORD="$DEVICE_SUDO_PASSWORD"
 EOF
         run_sudo install -m 0600 "$TMP_ENV" "$INSTALL_DIR/.env"
 
+        TMP_UNINSTALL="$TMP_DIR/uninstall.sh"
+        cat > "$TMP_UNINSTALL" <<'EOF_UNINSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME={shlex.quote(unit_name)}
+INSTALL_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+INSTALL_ROOT="$(dirname "$INSTALL_DIR")"
+ENV_FILE="$INSTALL_DIR/.env"
+
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+DEVICE_SUDO_PASSWORD="${{SUDO_PASSWORD:-${{TEST_SUDO_PASSWORD:-}}}}"
+
+run_sudo() {{
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  elif [ -n "$DEVICE_SUDO_PASSWORD" ]; then
+    printf '%s\\n' "$DEVICE_SUDO_PASSWORD" | sudo -S -p '' "$@"
+  else
+    sudo "$@"
+  fi
+}}
+
+FINAL_SCRIPT="$(mktemp "/tmp/${{SERVICE_NAME}}-uninstall.XXXXXX.sh")"
+cat > "$FINAL_SCRIPT" <<EOF_FINAL
+#!/usr/bin/env bash
+set -euo pipefail
+SERVICE_NAME=$(printf '%q' "$SERVICE_NAME")
+INSTALL_DIR=$(printf '%q' "$INSTALL_DIR")
+INSTALL_ROOT=$(printf '%q' "$INSTALL_ROOT")
+systemctl disable "\\${{SERVICE_NAME}}.service" >/dev/null 2>&1 || true
+rm -f "/etc/systemd/system/\\${{SERVICE_NAME}}.service"
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl reset-failed "\\${{SERVICE_NAME}}.service" >/dev/null 2>&1 || true
+rm -rf "\\${{INSTALL_DIR}}"
+rmdir "\\${{INSTALL_ROOT}}" >/dev/null 2>&1 || true
+rm -f "\\$0"
+systemctl stop "\\${{SERVICE_NAME}}.service" >/dev/null 2>&1 || true
+EOF_FINAL
+chmod 700 "$FINAL_SCRIPT"
+
+if command -v systemd-run >/dev/null 2>&1; then
+  run_sudo systemd-run --unit="${{SERVICE_NAME}}-uninstall" --collect /bin/bash "$FINAL_SCRIPT"
+else
+  run_sudo /bin/bash "$FINAL_SCRIPT" &
+fi
+EOF_UNINSTALL
+        run_sudo install -m 0755 "$TMP_UNINSTALL" "$INSTALL_DIR/uninstall.sh"
+        run_sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
+
         TMP_SERVICE="$TMP_DIR/$SERVICE_NAME.service"
         cat > "$TMP_SERVICE" <<EOF
         [Unit]
@@ -493,8 +723,12 @@ EOF
 
         [Service]
         Type=simple
-        WorkingDirectory=$INSTALL_DIR
+        User=$SERVICE_USER
+        Group=$SERVICE_GROUP
+        WorkingDirectory=$SERVICE_HOME
         EnvironmentFile=$INSTALL_DIR/.env
+        Environment=HOME=$SERVICE_HOME
+        Environment=PYTHONUNBUFFERED=1
         ExecStart=$VENV_PYTHON $INSTALL_DIR/client.py
         Restart=always
         RestartSec=5
@@ -840,6 +1074,8 @@ def job_started(job_id: str) -> JSONResponse:
     job["started_at"] = utc_now()
     job["updated_at"] = utc_now()
     write_json(JOBS_PATH, jobs_doc)
+    if success and job.get("kind") == UNINSTALL_JOB_KIND:
+        finalize_registered_device_removal(str(job.get("device_uuid", "")))
     return JSONResponse({"ok": True, "job": job})
 
 

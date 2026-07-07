@@ -15,12 +15,30 @@ fi
 
 PY=python3
 APP_DIR="$(pwd)"
+APP_USER="${PIGION_APP_USER:-${SUDO_USER:-$USER}}"
+APP_GROUP="$(id -gn "$APP_USER")"
+APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+if [ -z "$APP_HOME" ]; then
+  APP_HOME="$(eval echo "~$APP_USER")"
+fi
 
 run_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
   else
     sudo "$@"
+  fi
+}
+
+repair_app_ownership() {
+  local paths=()
+  for path in .env .venv server/config.json server/devices.json server/jobs.json server/sessions.json server/installers orchestrator/tools orchestrator/exp; do
+    if [ -e "$path" ]; then
+      paths+=("$path")
+    fi
+  done
+  if [ "${#paths[@]}" -gt 0 ]; then
+    run_sudo chown -R "$APP_USER:$APP_GROUP" "${paths[@]}" || true
   fi
 }
 
@@ -121,15 +139,12 @@ install_systemd_services() {
   else
     service_python="$(command -v "$PY")"
   fi
-  local app_user="${SUDO_USER:-$USER}"
-  local app_group
-  app_group="$(id -gn "$app_user")"
-
   upsert_env "PIGION_SERVER_URL" "$server_url"
   upsert_env "PIGION_WEB_HOST" "$web_host"
   upsert_env "PIGION_WEB_PORT" "$web_port"
   update_server_config_url "$server_url"
   allow_tailscale_firewall "$web_port"
+  repair_app_ownership
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -143,10 +158,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$app_user
-Group=$app_group
+User=$APP_USER
+Group=$APP_GROUP
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
+Environment=HOME=$APP_HOME
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$service_python -m uvicorn server.server:app --host $web_host --port $web_port
 Restart=always
@@ -164,10 +180,11 @@ Wants=network-online.target pigion-web.service
 
 [Service]
 Type=simple
-User=$app_user
-Group=$app_group
+User=$APP_USER
+Group=$APP_GROUP
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$APP_DIR/.env
+Environment=HOME=$APP_HOME
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$service_python -m server.orchestrator_client --server $server_url --python $service_python --project-root $APP_DIR
 Restart=always
@@ -273,6 +290,7 @@ if [ -f .env ]; then
 fi
 
 chmod 600 .env || true
+repair_app_ownership
 
 echo "Done. .env created/updated."
 if [[ "$CREATE_VENV" =~ ^[Yy] ]]; then

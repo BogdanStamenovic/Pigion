@@ -235,7 +235,7 @@ Set `PIGION_SERVER_URL` to the reachable host name before registering devices if
 PIGION_SERVER_URL="http://100.x.y.z:8000"
 ```
 
-The generated `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs from `/opt/pigion/DEVICE_NAME` by default. Override that with `PIGION_INSTALL_ROOT` when running the installer.
+The generated `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/opt/pigion/DEVICE_NAME/uninstall.sh`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs as the installing user, starts from that user's home directory, and keeps the code/config under `/opt/pigion/DEVICE_NAME` by default. Override that install location with `PIGION_INSTALL_ROOT` when running the installer.
 
 The target `.env` is populated automatically from registration:
 
@@ -258,7 +258,7 @@ The generated device-side `client.py`:
 
 ### Device Removal
 
-The dashboard has a `Remove Registered Device` action. Removing a device deletes its record from `server/devices.json`, deletes queued jobs for that device, removes the generated `orchestrator/tools/device_DEVICE_NAME.py` module, removes the matching `orchestrator/exp/td.txt` entry, deletes the generated installer and generated local package, and best-effort disables/removes a local `pigion_DEVICE_NAME.service` plus `/opt/pigion/DEVICE_NAME` when the orchestrator is running on the same machine.
+The dashboard has a `Remove Registered Device` action. Removing a device queues a special uninstall job for that device. The installed client handles that job by launching `/opt/pigion/DEVICE_NAME/uninstall.sh`, which reads sudo credentials from `/opt/pigion/DEVICE_NAME/.env` and removes the device service plus install directory on the target. After the device acknowledges the uninstall job, the server deletes its registry row, queued jobs, generated orchestrator tool, generated installer, and generated local package. If the device is down or does not acknowledge in time, it remains registered with the uninstall job pending so it can receive the command when it comes back online.
 
 ### Device Client API
 

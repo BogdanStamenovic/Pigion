@@ -80,7 +80,13 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
 
 
-def create_job(device_uuid: str, goal: str, source: str = "dashboard") -> dict[str, Any]:
+def create_job(
+    device_uuid: str,
+    goal: str,
+    source: str = "dashboard",
+    *,
+    kind: str = "goal",
+) -> dict[str, Any]:
     jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
     job_id = str(uuid.uuid4())
     job = {
@@ -88,6 +94,7 @@ def create_job(device_uuid: str, goal: str, source: str = "dashboard") -> dict[s
         "device_uuid": device_uuid,
         "goal": goal,
         "source": source,
+        "kind": kind,
         "status": "waiting",
         "created_at": utc_now(),
         "updated_at": utc_now(),
