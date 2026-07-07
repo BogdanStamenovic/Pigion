@@ -42,6 +42,7 @@ from server.web_store import (
     hash_password,
     now_ts,
     read_json,
+    update_json,
     utc_now,
     write_json,
 )
@@ -1066,61 +1067,79 @@ def get_job(device_uuid: str) -> JSONResponse:
 
 @app.post("/api/jobs/{job_id}/started")
 def job_started(job_id: str) -> JSONResponse:
-    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
-    job = jobs_doc.get("jobs", {}).get(job_id)
+    def mark_started(jobs_doc: dict[str, Any]) -> dict[str, Any] | None:
+        job = jobs_doc.get("jobs", {}).get(job_id)
+        if not job:
+            return None
+        job["status"] = "running"
+        job["started_at"] = utc_now()
+        job["updated_at"] = utc_now()
+        return job
+
+    job = update_json(JOBS_PATH, {"jobs": {}}, mark_started)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job["status"] = "running"
-    job["started_at"] = utc_now()
-    job["updated_at"] = utc_now()
-    write_json(JOBS_PATH, jobs_doc)
     return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/api/jobs/{job_id}/progress")
 async def job_progress(job_id: str, request: Request) -> JSONResponse:
     payload = await request.json()
-    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
-    job = jobs_doc.get("jobs", {}).get(job_id)
+
+    def mark_progress(jobs_doc: dict[str, Any]) -> dict[str, Any] | None:
+        job = jobs_doc.get("jobs", {}).get(job_id)
+        if not job:
+            return None
+        job["progress"] = str(payload.get("progress", ""))
+        if payload.get("log"):
+            job.setdefault("logs", []).append({"at": utc_now(), "message": str(payload["log"])})
+        job["updated_at"] = utc_now()
+        return job
+
+    job = update_json(JOBS_PATH, {"jobs": {}}, mark_progress)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    job["progress"] = str(payload.get("progress", ""))
-    if payload.get("log"):
-        job.setdefault("logs", []).append({"at": utc_now(), "message": str(payload["log"])})
-    job["updated_at"] = utc_now()
-    write_json(JOBS_PATH, jobs_doc)
     return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/api/jobs/{job_id}/finished")
 async def job_finished(job_id: str, request: Request) -> JSONResponse:
     payload = await request.json()
-    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
-    job = jobs_doc.get("jobs", {}).get(job_id)
+
+    def mark_finished(jobs_doc: dict[str, Any]) -> dict[str, Any] | None:
+        job = jobs_doc.get("jobs", {}).get(job_id)
+        if not job:
+            return None
+        success = bool(payload.get("success", True))
+        job["status"] = "finished" if success else "failed"
+        job["finished_at"] = utc_now()
+        job["updated_at"] = utc_now()
+        job["result"] = payload.get("result")
+        job["error"] = payload.get("error")
+        if payload.get("log"):
+            job.setdefault("logs", []).append({"at": utc_now(), "message": str(payload["log"])})
+        return job
+
+    job = update_json(JOBS_PATH, {"jobs": {}}, mark_finished)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    success = bool(payload.get("success", True))
-    job["status"] = "finished" if success else "failed"
-    job["finished_at"] = utc_now()
-    job["updated_at"] = utc_now()
-    job["result"] = payload.get("result")
-    job["error"] = payload.get("error")
-    if payload.get("log"):
-        job.setdefault("logs", []).append({"at": utc_now(), "message": str(payload["log"])})
-    write_json(JOBS_PATH, jobs_doc)
     return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/api/device/{device_uuid}/heartbeat")
 def heartbeat(device_uuid: str) -> JSONResponse:
-    devices_doc = read_json(DEVICES_PATH, {"devices": {}})
-    device = devices_doc.get("devices", {}).get(device_uuid)
+    def mark_heartbeat(devices_doc: dict[str, Any]) -> dict[str, Any] | None:
+        device = devices_doc.get("devices", {}).get(device_uuid)
+        if not device:
+            return None
+        device["last_heartbeat"] = utc_now()
+        device["last_heartbeat_ts"] = now_ts()
+        device["is_down"] = False
+        return device
+
+    device = update_json(DEVICES_PATH, {"devices": {}}, mark_heartbeat)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    device["last_heartbeat"] = utc_now()
-    device["last_heartbeat_ts"] = now_ts()
-    device["is_down"] = False
-    write_json(DEVICES_PATH, devices_doc)
     update_orchestrator_tool(device)
     return JSONResponse({"ok": True})
 

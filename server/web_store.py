@@ -5,9 +5,15 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback for local development.
+    fcntl = None  # type: ignore[assignment]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +29,38 @@ CONFIG_PATH = DATA_DIR / "config.json"
 SESSIONS_PATH = DATA_DIR / "sessions.json"
 
 _LOCK = threading.RLock()
+T = TypeVar("T")
+
+
+@contextmanager
+def file_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def write_json_unlocked(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def utc_now() -> str:
@@ -35,24 +73,37 @@ def now_ts() -> float:
 
 def read_json(path: Path, default: Any) -> Any:
     with _LOCK:
-        if not path.exists():
-            write_json(path, default)
-            return default
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return default
+        with file_lock(path):
+            if not path.exists():
+                write_json_unlocked(path, default)
+                return default
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return default
 
 
 def write_json(path: Path, data: Any) -> None:
     with _LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        tmp_path.replace(path)
+        with file_lock(path):
+            write_json_unlocked(path, data)
+
+
+def update_json(path: Path, default: Any, updater: Callable[[Any], T]) -> T:
+    with _LOCK:
+        with file_lock(path):
+            if not path.exists():
+                data = default
+            else:
+                try:
+                    with path.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except json.JSONDecodeError:
+                    data = default
+            result = updater(data)
+            write_json_unlocked(path, data)
+            return result
 
 
 def default_config() -> dict[str, Any]:
@@ -87,7 +138,6 @@ def create_job(
     *,
     kind: str = "goal",
 ) -> dict[str, Any]:
-    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
     job_id = str(uuid.uuid4())
     job = {
         "id": job_id,
@@ -105,20 +155,25 @@ def create_job(
         "error": None,
         "logs": [],
     }
-    jobs_doc.setdefault("jobs", {})[job_id] = job
-    write_json(JOBS_PATH, jobs_doc)
+
+    def add_job(jobs_doc: dict[str, Any]) -> dict[str, Any]:
+        jobs_doc.setdefault("jobs", {})[job_id] = job
+        return job
+
+    update_json(JOBS_PATH, {"jobs": {}}, add_job)
     return job
 
 
 def append_job_log(job_id: str, message: str) -> dict[str, Any] | None:
-    jobs_doc = read_json(JOBS_PATH, {"jobs": {}})
-    job = jobs_doc.get("jobs", {}).get(job_id)
-    if not job:
-        return None
-    job.setdefault("logs", []).append({"at": utc_now(), "message": message})
-    job["updated_at"] = utc_now()
-    write_json(JOBS_PATH, jobs_doc)
-    return job
+    def append_log(jobs_doc: dict[str, Any]) -> dict[str, Any] | None:
+        job = jobs_doc.get("jobs", {}).get(job_id)
+        if not job:
+            return None
+        job.setdefault("logs", []).append({"at": utc_now(), "message": message})
+        job["updated_at"] = utc_now()
+        return job
+
+    return update_json(JOBS_PATH, {"jobs": {}}, append_log)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
