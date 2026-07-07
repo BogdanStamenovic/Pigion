@@ -88,7 +88,7 @@ Windows PowerShell:
 .\setup.ps1
 ```
 
-The setup scripts can create `.venv`, install requirements, write `.env`, and populate `pi/exp/enving.txt` and `laptop/exp/enving.txt`.
+The setup scripts can create `.venv`, install requirements, write `.env`, and install the webserver/orchestrator systemd services.
 
 At minimum, `.env` needs:
 
@@ -154,10 +154,24 @@ The installer creates and enables:
 - `pigion-web.service`, which runs the FastAPI webserver.
 - `pigion-orchestrator.service`, which polls the webserver for goals targeting the local orchestrator and runs `orchestrator.run_orchestrator` for each queued goal.
 
+The service binds to `0.0.0.0` so it is reachable through normal LAN interfaces and Tailscale. When Tailscale is installed, the installer prefers the machine's Tailscale IPv4 address for `PIGION_SERVER_URL`, so generated device installers point at the Tailscale address. Override this with:
+
+```bash
+PIGION_PUBLIC_HOST=100.x.y.z ./install.sh
+```
+
+Uninstall the repo-local services with:
+
+```bash
+./uninstall.sh
+```
+
+That stops/disables `pigion-web.service` and `pigion-orchestrator.service`, removes their unit files and enablement symlinks, reloads systemd, and leaves repo data such as `.env`, `.venv`, and JSON state intact.
+
 Then open:
 
 ```text
-http://127.0.0.1:8000/login
+http://<tailscale-ip-or-hostname>:8000/login
 ```
 
 The default login is `admin` / `pigion`. For real use, set `PIGION_ORCHESTRATOR_USER` and `PIGION_ORCHESTRATOR_PASSWORD` before the first run, or edit `server/config.json`.
@@ -218,7 +232,7 @@ curl -fsSL http://127.0.0.1:8000/install/<device_uuid>.sh | bash
 Set `PIGION_SERVER_URL` to the reachable host name before registering devices if the device should install from another machine, for example:
 
 ```env
-PIGION_SERVER_URL="http://pigion:8000"
+PIGION_SERVER_URL="http://100.x.y.z:8000"
 ```
 
 The generated `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs from `/opt/pigion/DEVICE_NAME` by default. Override that with `PIGION_INSTALL_ROOT` when running the installer.

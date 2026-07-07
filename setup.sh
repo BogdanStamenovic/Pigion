@@ -35,15 +35,86 @@ upsert_env() {
   fi
 }
 
+detect_lan_ip() {
+  local ip_addr=""
+  if command -v hostname >/dev/null 2>&1; then
+    ip_addr="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^127\./ {print; exit}')"
+  fi
+  if [ -z "$ip_addr" ] && command -v ip >/dev/null 2>&1; then
+    ip_addr="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+  fi
+  if [ -z "$ip_addr" ]; then
+    ip_addr="127.0.0.1"
+  fi
+  printf '%s\n' "$ip_addr"
+}
+
+detect_tailscale_ip() {
+  local ip_addr=""
+  if command -v tailscale >/dev/null 2>&1; then
+    ip_addr="$(tailscale ip -4 2>/dev/null | awk 'NF {print; exit}')"
+  fi
+  if [ -z "$ip_addr" ] && command -v ip >/dev/null 2>&1; then
+    ip_addr="$(ip -4 addr show tailscale0 2>/dev/null | awk '/inet / {sub(/\/.*/, "", $2); print $2; exit}')"
+  fi
+  printf '%s\n' "$ip_addr"
+}
+
+detect_public_host() {
+  local ip_addr
+  ip_addr="$(detect_tailscale_ip)"
+  if [ -n "$ip_addr" ]; then
+    printf '%s\n' "$ip_addr"
+    return
+  fi
+  detect_lan_ip
+}
+
+update_server_config_url() {
+  local server_url="$1"
+  if [ ! -f server/config.json ]; then
+    return
+  fi
+  "$PY" - "$server_url" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+server_url = sys.argv[1]
+path = Path("server/config.json")
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    data = {}
+data["server_url"] = server_url
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+allow_tailscale_firewall() {
+  local web_port="$1"
+  if ! command -v ufw >/dev/null 2>&1; then
+    return
+  fi
+  if ! ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    return
+  fi
+  if ip link show tailscale0 >/dev/null 2>&1; then
+    echo "Allowing TCP $web_port on tailscale0 through UFW..."
+    run_sudo ufw allow in on tailscale0 to any port "$web_port" proto tcp comment "Pigion webserver via Tailscale" || true
+  fi
+}
+
 install_systemd_services() {
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found; skipping service installation."
     return
   fi
 
-  local web_host="${PIGION_WEB_HOST:-127.0.0.1}"
+  local web_host="${PIGION_WEB_HOST:-0.0.0.0}"
   local web_port="${PIGION_WEB_PORT:-8000}"
-  local server_url="${PIGION_SERVER_URL:-http://${web_host}:${web_port}}"
+  local public_host="${PIGION_PUBLIC_HOST:-$(detect_public_host)}"
+  local server_url="${PIGION_SERVER_URL:-http://${public_host}:${web_port}}"
   local service_python
   if [ -x "$APP_DIR/.venv/bin/python" ]; then
     service_python="$APP_DIR/.venv/bin/python"
@@ -57,6 +128,8 @@ install_systemd_services() {
   upsert_env "PIGION_SERVER_URL" "$server_url"
   upsert_env "PIGION_WEB_HOST" "$web_host"
   upsert_env "PIGION_WEB_PORT" "$web_port"
+  update_server_config_url "$server_url"
+  allow_tailscale_firewall "$web_port"
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -110,6 +183,7 @@ EOF
   run_sudo systemctl daemon-reload
   run_sudo systemctl enable --now pigion-web.service pigion-orchestrator.service
   echo "Installed services: pigion-web.service, pigion-orchestrator.service"
+  echo "Webserver should be reachable at: $server_url/login"
 }
 
 # Check for pip
@@ -206,44 +280,3 @@ if [[ "$CREATE_VENV" =~ ^[Yy] ]]; then
 fi
 
 install_systemd_services
-
-# Ask for device type
-read -r -p "Is this device a Pi or a Laptop? [pi/laptop]: " DEVICE_TYPE
-DEVICE_TYPE=${DEVICE_TYPE,,} # to lowercase
-
-# Auto-detect OS and TERMINAL for this device
-if [[ "$DEVICE_TYPE" == "pi" || "$DEVICE_TYPE" == "laptop" ]]; then
-  # Try to get pretty OS name
-  if [ -f /etc/os-release ]; then
-    DEVICE_OS=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'=' -f2- | tr -d '"')
-  else
-    DEVICE_OS=$(uname -a)
-  fi
-  DEVICE_TERMINAL=$(basename "$SHELL")
-fi
-
-# Set env file paths based on device type
-if [[ "$DEVICE_TYPE" == "pi" ]]; then
-  ENV_PATH="pi/exp/enving.txt"
-  OTHER_ENV_PATH="laptop/exp/enving.txt"
-  OTHER_LABEL="laptop"
-else
-  ENV_PATH="laptop/exp/enving.txt"
-  OTHER_ENV_PATH="pi/exp/enving.txt"
-  OTHER_LABEL="pi"
-fi
-
-# Create or update enving.txt for this device
-mkdir -p "$(dirname "$ENV_PATH")"
-echo "OS: $DEVICE_OS" > "$ENV_PATH"
-echo "TERMINAL: $DEVICE_TERMINAL" >> "$ENV_PATH"
-echo "Populated $ENV_PATH with this device's specs."
-
-# Ask for other device's enving.txt fields
-read -r -p "Enter $OTHER_LABEL OS (e.g. Windows 10): " OTHER_OS
-read -r -p "Enter $OTHER_LABEL TERMINAL (e.g. powershell): " OTHER_TERMINAL
-
-mkdir -p "$(dirname "$OTHER_ENV_PATH")"
-echo "OS: $OTHER_OS" > "$OTHER_ENV_PATH"
-echo "TERMINAL: $OTHER_TERMINAL" >> "$OTHER_ENV_PATH"
-echo "Populated $OTHER_ENV_PATH with $OTHER_LABEL specs."
