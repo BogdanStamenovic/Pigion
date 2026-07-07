@@ -33,6 +33,7 @@ _INTERACTIVE_MODE = False
 _START_CWD = os.getcwd()
 _DOTENV_LOADED = False
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_TOOL_DIR = os.path.abspath(os.path.dirname(__file__))
 
 MAX_SHELL_OUTPUT_CHARS = int(os.environ.get("MAX_SHELL_OUTPUT", "200000"))
 DEFAULT_TAIL_LINES = int(os.environ.get("SHELL_TAIL_LINES", "50"))
@@ -433,6 +434,25 @@ def _load_dotenv(path: str) -> None:
                     os.environ[key] = val
     except Exception:
         return
+
+
+def _find_dotenv() -> Optional[str]:
+    seen = set()
+
+    for start in (_TOOL_DIR, _START_CWD):
+        cur = os.path.abspath(start)
+        while cur and cur not in seen:
+            seen.add(cur)
+            candidate = os.path.join(cur, ".env")
+            if os.path.exists(candidate):
+                return candidate
+
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+
+    return None
 
 
 def _match_truncation_policy(command_str: str):
@@ -1083,7 +1103,8 @@ def run_shell(
                 sudo_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
 
                 if (sudo_password is None) and (not _DOTENV_LOADED):
-                    _load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+                    dotenv_path = _find_dotenv() or os.path.join(_PROJECT_ROOT, ".env")
+                    _load_dotenv(dotenv_path)
                     globals()["_DOTENV_LOADED"] = True
                     sudo_password = os.environ.get("SUDO_PASSWORD") or os.environ.get("TEST_SUDO_PASSWORD")
 
