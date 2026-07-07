@@ -3,6 +3,7 @@ import math
 import os  # Kept here
 import re
 import time
+import argparse
 from typing import Any, Dict, List, Optional
 
 from google import genai
@@ -1501,8 +1502,14 @@ def run_agent(goal: str) -> None:
 # =========================
 if __name__ == "__main__":
     try:
-        run_agent( 
-            "make a falder called test in the home folder of kali")
+        parser = argparse.ArgumentParser(description="Run the Pigion orchestrator for one goal.")
+        parser.add_argument("goal", nargs="*", help="Goal text to route through the orchestrator.")
+        parser.add_argument("--goal", dest="goal_option", help="Goal text to route through the orchestrator.")
+        args = parser.parse_args()
+        goal = args.goal_option or " ".join(args.goal).strip()
+        if not goal:
+            parser.error("provide a goal")
+        run_agent(goal)
     finally:
         try:
             client.close()

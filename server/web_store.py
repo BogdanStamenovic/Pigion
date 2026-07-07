@@ -14,6 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATOR_ROOT = PROJECT_ROOT / "orchestrator"
 SERVER_ROOT = PROJECT_ROOT / "server"
 DATA_DIR = Path(os.environ.get("PIGION_ORCHESTRATOR_DATA", SERVER_ROOT))
+ORCHESTRATOR_JOB_TARGET = "__orchestrator__"
+ORCHESTRATOR_DISPLAY_NAME = "Local Orchestrator"
 
 DEVICES_PATH = DATA_DIR / "devices.json"
 JOBS_PATH = DATA_DIR / "jobs.json"

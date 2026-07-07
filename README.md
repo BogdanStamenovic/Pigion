@@ -137,11 +137,22 @@ run_agent("Inspect the current directory and summarize the files.")
 | `server/config.json` | Login defaults, heartbeat timeout, session TTL, and public server URL. |
 | `server/sessions.json` | Login session cookies. |
 
-Start it with:
+Start it manually with:
 
 ```bash
 python -m uvicorn server.server:app --host 127.0.0.1 --port 8000
 ```
+
+Or install the repo-local services:
+
+```bash
+./install.sh
+```
+
+The installer creates and enables:
+
+- `pigion-web.service`, which runs the FastAPI webserver.
+- `pigion-orchestrator.service`, which polls the webserver for goals targeting the local orchestrator and runs `orchestrator.run_orchestrator` for each queued goal.
 
 Then open:
 
@@ -160,7 +171,7 @@ The dashboard currently includes:
 - Recent logs.
 - Register Device page.
 - Remove Registered Device page.
-- Send Goal page.
+- Send Goal page. Choose `Local Orchestrator` to route the goal through the orchestrator, or choose a registered device to queue directly to that device.
 
 ### Device Registration
 
@@ -185,6 +196,18 @@ device_Bogdan:Check system temperature
 ```
 
 Because `orchestrator/run_orchestrator.py` imports tools from `orchestrator/exp/td.txt`, the generated tool module is required. The `td.txt` entry also preserves the current brittle parser shape: the third comma-separated field must contain `Command - prefix:...`.
+
+### Orchestrator Goals
+
+The webserver reserves the internal job target `__orchestrator__` for local orchestrator work. The browser `Send Goal` page exposes this as `Local Orchestrator`; posted goals are picked up by `server/orchestrator_client.py`. The worker starts a fresh orchestrator process for each goal so new device registrations are visible without restarting the worker.
+
+Goals can also be queued through JSON:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/orchestrator/goals \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"Check which registered device should handle this."}'
+```
 
 The final registration page prints an installer command:
 

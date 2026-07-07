@@ -29,6 +29,8 @@ from server.web_store import (
     CONFIG_PATH,
     DEVICES_PATH,
     JOBS_PATH,
+    ORCHESTRATOR_DISPLAY_NAME,
+    ORCHESTRATOR_JOB_TARGET,
     ORCHESTRATOR_ROOT,
     PROJECT_ROOT,
     SERVER_ROOT,
@@ -303,6 +305,13 @@ def server_url() -> str:
 
 def install_command(device_uuid: str) -> str:
     return f"curl -fsSL {server_url()}/install/{device_uuid}.sh | bash"
+
+
+def job_target_label(device_uuid: str) -> str:
+    if device_uuid == ORCHESTRATOR_JOB_TARGET:
+        return ORCHESTRATOR_DISPLAY_NAME
+    device = read_json(DEVICES_PATH, {"devices": {}}).get("devices", {}).get(device_uuid)
+    return str(device.get("name") or device_uuid or "unknown")
 
 
 def get_device_or_404(device_uuid: str) -> dict[str, Any]:
@@ -606,7 +615,7 @@ def dashboard(request: Request) -> str:
         for d in devices
     ) or "<tr><td colspan='4' class='muted'>No devices registered.</td></tr>"
     recent_jobs = "".join(
-        f"<tr><td>{e(j.get('status'))}</td><td>{e(j.get('goal'))}</td><td><code>{e(j.get('device_uuid'))}</code></td><td>{e(j.get('updated_at'))}</td></tr>"
+        f"<tr><td>{e(j.get('status'))}</td><td>{e(j.get('goal'))}</td><td>{e(job_target_label(str(j.get('device_uuid', ''))))}</td><td>{e(j.get('updated_at'))}</td></tr>"
         for j in jobs[:8]
     ) or "<tr><td colspan='4' class='muted'>No goals yet.</td></tr>"
     recent_logs = []
@@ -616,7 +625,7 @@ def dashboard(request: Request) -> str:
     body = f"""
 <section><h1>Dashboard</h1><div class="grid"><p><strong>Queue</strong><br>{counts['running']} running<br>{counts['waiting']} waiting</p><p><strong>Devices</strong><br>{len(devices)} registered</p></div></section>
 <section><h2>Devices</h2><table><tr><th>Device</th><th>UUID</th><th>Last heartbeat</th><th>Remove</th></tr>{device_rows}</table></section>
-<section><h2>Recent Goals</h2><table><tr><th>Status</th><th>Goal</th><th>Device</th><th>Updated</th></tr>{recent_jobs}</table></section>
+<section><h2>Recent Goals</h2><table><tr><th>Status</th><th>Goal</th><th>Target</th><th>Updated</th></tr>{recent_jobs}</table></section>
 <section><h2>Recent Logs</h2><table><tr><th>Time</th><th>Job</th><th>Message</th></tr>{''.join(recent_logs[:12]) or "<tr><td colspan='3' class='muted'>No logs yet.</td></tr>"}</table></section>
 """
     return layout("Dashboard", body)
@@ -774,12 +783,13 @@ async def register(request: Request) -> str:
 def goals_page(request: Request) -> str:
     require_login(request)
     devices = refresh_device_availability()
-    options = "".join(f"<option value='{e(d['uuid'])}'>{e(d['name'])} {'(DEVICE IS DOWN)' if d.get('is_down') else ''}</option>" for d in devices)
+    options = f"<option value='{e(ORCHESTRATOR_JOB_TARGET)}'>{e(ORCHESTRATOR_DISPLAY_NAME)}</option>"
+    options += "".join(f"<option value='{e(d['uuid'])}'>{e(d['name'])} {'(DEVICE IS DOWN)' if d.get('is_down') else ''}</option>" for d in devices)
     return layout(
         "Send Goal",
         f"""<form class="panel" method="post" action="/goals">
   <h1>Send Goal</h1>
-  <label>Device</label><select name="device_uuid">{options}</select>
+  <label>Target</label><select name="device_uuid">{options}</select>
   <label>Goal</label><textarea name="goal" required></textarea>
   <p><button type="submit">Queue Goal</button></p>
 </form>""",
@@ -790,8 +800,24 @@ def goals_page(request: Request) -> str:
 async def create_goal(request: Request) -> Response:
     require_login(request)
     data = form_data(await request.body())
-    create_job(data.get("device_uuid", ""), data.get("goal", ""), source="dashboard")
+    device_uuid = data.get("device_uuid", "").strip()
+    goal = data.get("goal", "").strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="Goal is required.")
+    if device_uuid != ORCHESTRATOR_JOB_TARGET:
+        get_device_or_404(device_uuid)
+    create_job(device_uuid, goal, source="dashboard")
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/api/orchestrator/goals")
+async def api_create_orchestrator_goal(request: Request) -> JSONResponse:
+    payload = await request.json()
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="Goal is required.")
+    job = create_job(ORCHESTRATOR_JOB_TARGET, goal, source="api_orchestrator")
+    return JSONResponse({"ok": True, "job": job})
 
 
 @app.get("/api/jobs/{device_uuid}")
