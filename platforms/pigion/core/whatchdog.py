@@ -3,6 +3,8 @@ import math
 import os  # Kept here
 import re
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from google import genai
@@ -31,6 +33,10 @@ load_dotenv()
 NAME = "pi"
 ABS_PATH = os.path.join(os.getenv("ABS_PATH"), NAME)
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "700"))
 MAX_ACTIONS_PER_STEP = int(os.getenv("MAX_ACTIONS_PER_STEP", "12"))
@@ -296,17 +302,129 @@ def infer_failure_name(action: str, error: str) -> str:
 
 
 # =========================
-# CLIENT INIT
+# LLM CLIENTS
 # =========================
-def init_client() -> genai.Client:
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return ""
+
+
+def _normalize_provider(provider: str) -> str:
+    provider = provider.strip().lower()
+    aliases = {
+        "google": "gemini",
+        "google-genai": "gemini",
+        "gpt": "openai",
+        "local": "ollama",
+    }
+    provider = aliases.get(provider, provider)
+    if provider not in {"gemini", "openai", "ollama"}:
+        raise ValueError("LLM_PROVIDER must be one of: gemini, openai, ollama")
+    return provider
+
+
+def _normalize_base_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return "http://127.0.0.1:11434"
+    if not re.match(r"^https?://", url):
+        url = "http://" + url
+    return url.rstrip("/")
+
+
+def _active_model_name() -> str:
+    provider = _normalize_provider(LLM_PROVIDER)
+    if LLM_MODEL:
+        return LLM_MODEL
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    if provider == "ollama":
+        return os.getenv("OLLAMA_MODEL", "llama3.1")
+    return os.getenv("GEMINI_MODEL", MODEL_NAME)
+
+
+def _post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None, timeout: int = 120) -> Dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from exc
+
+
+def init_client() -> Optional[genai.Client]:
     load_dotenv()
-    api_key = os.getenv("API_KEY")
+    if _normalize_provider(LLM_PROVIDER) != "gemini":
+        return None
+    api_key = _env_first("GEMINI_API_KEY", "LLM_API_KEY", "API_KEY")
     if api_key:
         return genai.Client(api_key=api_key)
     return genai.Client()
 
 
 client = init_client()
+
+
+def generate_text(prompt: str, system_prompt: str = "") -> str:
+    provider = _normalize_provider(LLM_PROVIDER)
+    model_name = _active_model_name()
+    full_prompt = system_prompt + "\n\n" + prompt if system_prompt else prompt
+
+    if provider == "gemini":
+        if client is None:
+            raise RuntimeError("Gemini client was not initialized.")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                temperature=TEMPERATURE,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            ),
+        )
+        return (response.text or "").strip()
+
+    if provider == "openai":
+        api_key = _env_first("OPENAI_API_KEY", "LLM_API_KEY", "API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY or LLM_API_KEY is required for LLM_PROVIDER=openai.")
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt or "You are a helpful assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": TEMPERATURE,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+        }
+        data = _post_json(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        return str(data["choices"][0]["message"]["content"]).strip()
+
+    payload = {
+        "model": model_name,
+        "prompt": prompt,
+        "system": system_prompt,
+        "stream": False,
+        "options": {
+            "temperature": TEMPERATURE,
+            "num_predict": MAX_OUTPUT_TOKENS,
+        },
+    }
+    data = _post_json(f"{_normalize_base_url(OLLAMA_HOST)}/api/generate", payload, timeout=300)
+    return str(data.get("response", "")).strip()
 
 
 
@@ -387,16 +505,7 @@ def call_llm(prompt: str, system_prompt: str) -> Dict[str, Any]:
     last_error: Optional[Exception] = None
     for attempt in range(1, MAX_LLM_RETRIES + 1):
         try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=TEMPERATURE,
-                    max_output_tokens=MAX_OUTPUT_TOKENS,
-                ),
-            )
-
-            raw = (response.text or "").strip()
+            raw = generate_text(prompt + disclaimer, system_prompt)
             print("\n🧠 RAW MODEL OUTPUT:")
             print(raw)
 
@@ -462,16 +571,7 @@ For example. If the user says "Sort the files in this folder", you should NOT om
     last_error: Optional[Exception] = None
     for attempt in range(1, MAX_LLM_RETRIES + 1):
         try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=system + "\n\n" + prompt,
-                config=types.GenerateContentConfig(
-                    temperature=TEMPERATURE,
-                    max_output_tokens=MAX_OUTPUT_TOKENS,
-                ),
-            )
-
-            raw = (response.text or "").strip()
+            raw = generate_text(prompt, system)
             global tokens_used
             tokens_used += added_tokens
 

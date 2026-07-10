@@ -21,9 +21,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from maker import (
     create_instance,
     detect_environment_values,
+    discover_frameworks,
     discover_platforms,
     discover_tools_for_platform,
-    normalize_tools,
+    render_tool_docs,
     render_environment,
 )
 from server.web_store import (
@@ -450,6 +451,52 @@ def install_command(device_uuid: str) -> str:
     return f"curl -fsSL {server_url()}/install/{device_uuid}.sh | bash"
 
 
+def parse_framework_platform(raw_value: str) -> tuple[str, str]:
+    value = raw_value.strip().lower()
+    if "::" in value:
+        framework, platform = value.split("::", 1)
+    elif "/" in value:
+        framework, platform = value.split("/", 1)
+    else:
+        framework, platform = "pigion", value
+    framework = framework.strip()
+    platform = platform.strip()
+    if not framework or not platform:
+        raise ValueError("Choose a framework/runtime template.")
+    return framework, platform
+
+
+def default_capability_block(framework: str, platform: str, selected_tools: list[str]) -> str:
+    tool_docs = " ".join(render_tool_docs(selected_tools, platform, framework).split())
+    return (
+        f"{framework}/{platform} watchdog device. "
+        f"Automatically discovered tools: {', '.join(selected_tools)}. "
+        f"Tool docs: {tool_docs}"
+    ).strip()
+
+
+def normalize_llm_provider(raw_value: str) -> str:
+    provider = (raw_value or "gemini").strip().lower()
+    aliases = {
+        "google": "gemini",
+        "google-genai": "gemini",
+        "gpt": "openai",
+        "local": "ollama",
+    }
+    provider = aliases.get(provider, provider)
+    if provider not in {"gemini", "openai", "ollama"}:
+        raise ValueError("Choose one of these model providers: gemini, openai, ollama.")
+    return provider
+
+
+def default_llm_model(provider: str) -> str:
+    return {
+        "gemini": "gemini-2.5-flash-lite",
+        "openai": "gpt-4.1-mini",
+        "ollama": "llama3.1",
+    }.get(provider, "gemini-2.5-flash-lite")
+
+
 def job_target_label(device_uuid: str) -> str:
     if device_uuid == ORCHESTRATOR_JOB_TARGET:
         return ORCHESTRATOR_DISPLAY_NAME
@@ -592,6 +639,10 @@ def write_install_script(device: dict[str, Any]) -> str:
     unit_name = f"pigion_{device_name}"
     api_token = str(device.get("api_token", ""))
     sudo_password = str(device.get("sudo_password", ""))
+    llm_provider = normalize_llm_provider(str(device.get("llm_provider", "gemini")))
+    llm_model = str(device.get("llm_model") or default_llm_model(llm_provider))
+    ollama_host = str(device.get("ollama_host") or "http://127.0.0.1:11434")
+    openai_base_url = str(device.get("openai_base_url") or "https://api.openai.com/v1")
     return textwrap.dedent(
         f"""#!/usr/bin/env bash
         set -euo pipefail
@@ -601,6 +652,10 @@ def write_install_script(device: dict[str, Any]) -> str:
         SERVER_URL={shlex.quote(server_url())}
         DEVICE_API_TOKEN={shlex.quote(api_token)}
         DEVICE_SUDO_PASSWORD={shlex.quote(sudo_password)}
+        DEVICE_LLM_PROVIDER={shlex.quote(llm_provider)}
+        DEVICE_LLM_MODEL={shlex.quote(llm_model)}
+        DEVICE_OLLAMA_HOST={shlex.quote(ollama_host)}
+        DEVICE_OPENAI_BASE_URL={shlex.quote(openai_base_url)}
         INSTALL_ROOT="${{PIGION_INSTALL_ROOT:-/opt/pigion}}"
         INSTALL_DIR="$INSTALL_ROOT/$DEVICE_NAME"
         SERVICE_NAME={shlex.quote(unit_name)}
@@ -654,6 +709,13 @@ def write_install_script(device: dict[str, Any]) -> str:
         cat > "$TMP_ENV" <<EOF
 ABS_PATH="$INSTALL_DIR"
 API_KEY="$DEVICE_API_TOKEN"
+LLM_PROVIDER="$DEVICE_LLM_PROVIDER"
+LLM_MODEL="$DEVICE_LLM_MODEL"
+LLM_API_KEY="$DEVICE_API_TOKEN"
+GEMINI_API_KEY="$DEVICE_API_TOKEN"
+OPENAI_API_KEY="$DEVICE_API_TOKEN"
+OPENAI_BASE_URL="$DEVICE_OPENAI_BASE_URL"
+OLLAMA_HOST="$DEVICE_OLLAMA_HOST"
 SUDO_PASSWORD="$DEVICE_SUDO_PASSWORD"
 TEST_SUDO_PASSWORD="$DEVICE_SUDO_PASSWORD"
 EOF
@@ -903,33 +965,40 @@ def register_page(request: Request) -> str:
     require_login(request)
     platform_blocks = []
     platform_options = []
-    for platform in discover_platforms():
-        platform_options.append(f"<option value='{e(platform)}'>{e(platform)}</option>")
-        tools = discover_tools_for_platform(platform)
-        try:
-            default_os, default_terminal = detect_environment_values(platform)
-        except Exception:
-            default_os, default_terminal = "", ""
-        tool_checks = "".join(
-            f"<label><input type='checkbox' name='tools' value='{e(tool)}'> {e(tool)}</label>"
-            for tool in tools
-        )
-        platform_blocks.append(
-            f"<section><h3>{e(platform)} tools</h3>{tool_checks or '<p class=\"muted\">No tools found.</p>'}<p class='muted'>Suggested OS: {e(default_os)}; terminal: {e(default_terminal)}</p></section>"
-        )
+    for framework in discover_frameworks():
+        for platform in discover_platforms(framework):
+            option_value = f"{framework}::{platform}"
+            platform_options.append(f"<option value='{e(option_value)}'>{e(framework)}/{e(platform)}</option>")
+            tools = discover_tools_for_platform(platform, framework)
+            try:
+                default_os, default_terminal = detect_environment_values(platform, framework)
+            except Exception:
+                default_os, default_terminal = "", ""
+            tool_docs = render_tool_docs(tools, platform, framework) if tools else ""
+            platform_blocks.append(
+                f"<section><h3>{e(framework)}/{e(platform)} discovered tools</h3><p><code>{e(', '.join(tools) or 'none')}</code></p>{f'<pre>{e(tool_docs)}</pre>' if tool_docs else '<p class=\"muted\">No tools found.</p>'}<p class='muted'>Suggested OS: {e(default_os)}; terminal: {e(default_terminal)}</p></section>"
+            )
     return layout(
         "Register Device",
         f"""<form class="panel" method="post" action="/register">
   <h1>Register Device</h1>
   <label>Watchdog name</label><input name="name" placeholder="kitchen_pi" required>
-  <label>Platform template</label><select name="platform" required>{''.join(platform_options)}</select>
+  <label>Framework/runtime template</label><select name="framework_platform" required>{''.join(platform_options)}</select>
   <label>Device OS</label><input name="device_os" placeholder="Raspberry Pi OS / Ubuntu / Windows / ..." required>
   <label>Device terminal</label><input name="device_terminal" placeholder="bash / zsh / powershell / ..." required>
-  <label>API token</label><input name="api_token" type="password" autocomplete="off" required>
+  <label>Model provider</label><select name="llm_provider" required>
+    <option value="gemini">Gemini</option>
+    <option value="openai">OpenAI</option>
+    <option value="ollama">Ollama</option>
+  </select>
+  <label>Model name</label><input name="llm_model" value="gemini-2.5-flash-lite" placeholder="gemini-2.5-flash-lite / gpt-4.1-mini / llama3.1" required>
+  <label>Model API key</label><input name="api_token" type="password" autocomplete="off" placeholder="Leave blank for Ollama">
+  <label>Ollama host</label><input name="ollama_host" placeholder="http://192.168.1.50:11434">
+  <label>OpenAI base URL</label><input name="openai_base_url" value="https://api.openai.com/v1">
   <label>Sudo password</label><input name="sudo_password" type="password" autocomplete="off">
-  <label>td.txt capability block</label><textarea name="capability_block" placeholder="Linux Pi device that can run shell/search/memory actions..." required></textarea>
+  <label>td.txt capability block</label><textarea name="capability_block" placeholder="Leave blank to use the discovered framework/runtime tool docs automatically."></textarea>
   <h2>Tools</h2>
-  <p class="muted">Select the tools for the chosen platform. This intentionally does not auto-select everything.</p>
+  <p class="muted">Tools are discovered automatically from the chosen framework/runtime td.txt and tool files.</p>
   {''.join(platform_blocks)}
   <p><button type="submit">Register Device</button></p>
 </form>""",
@@ -941,26 +1010,46 @@ async def register(request: Request) -> str:
     require_login(request)
     raw_body = await request.body()
     data = form_data(raw_body)
-    values = form_values(raw_body)
     name = data.get("name", "").strip()
-    platform = data.get("platform", "").strip().lower()
+    try:
+        framework, platform = parse_framework_platform(
+            data.get("framework_platform") or data.get("platform", "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     device_os = data.get("device_os", "").strip()
     device_terminal = data.get("device_terminal", "").strip()
+    try:
+        llm_provider = normalize_llm_provider(data.get("llm_provider", "gemini"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    llm_model = data.get("llm_model", "").strip() or default_llm_model(llm_provider)
     api_token = data.get("api_token", "").strip()
+    ollama_host = data.get("ollama_host", "").strip() or "http://127.0.0.1:11434"
+    openai_base_url = data.get("openai_base_url", "").strip() or "https://api.openai.com/v1"
     sudo_password = data.get("sudo_password", "")
     capability_block = data.get("capability_block", "").strip()
-    if not api_token:
-        raise HTTPException(status_code=400, detail="API token is required.")
-    selected_tools = normalize_tools(",".join(values.get("tools", [])), discover_tools_for_platform(platform))
+    if llm_provider in {"gemini", "openai"} and not api_token:
+        raise HTTPException(status_code=400, detail="Model API key is required for Gemini and OpenAI.")
+    selected_tools = discover_tools_for_platform(platform, framework)
     if not selected_tools:
-        raise HTTPException(status_code=400, detail="Select at least one tool.")
+        raise HTTPException(status_code=400, detail="No tools were discovered for that framework/runtime.")
+    if not capability_block:
+        capability_block = default_capability_block(framework, platform, selected_tools)
     pull = subprocess.run(["git", "pull"], cwd=PROJECT_ROOT, text=True, capture_output=True)
     if pull.returncode != 0:
         raise HTTPException(status_code=500, detail=f"git pull failed: {pull.stderr or pull.stdout}")
 
     environment_text = render_environment(device_os, device_terminal)
     try:
-        runner_path = create_instance(name, platform, selected_tools, environment_text=environment_text, force=True)
+        runner_path = create_instance(
+            name,
+            platform,
+            selected_tools,
+            framework=framework,
+            environment_text=environment_text,
+            force=True,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -976,10 +1065,15 @@ async def register(request: Request) -> str:
         "uuid": device_uuid,
         "name": name,
         "command": command,
+        "framework": framework,
         "platform": platform,
         "selected_tools": selected_tools,
         "device_os": device_os,
         "device_terminal": device_terminal,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "ollama_host": ollama_host,
+        "openai_base_url": openai_base_url,
         "api_token": api_token,
         "sudo_password": sudo_password,
         "capability_block": capability_block,
@@ -1006,7 +1100,9 @@ async def register(request: Request) -> str:
   <p><strong>UUID:</strong> <code>{e(device_uuid)}</code></p>
   <p><strong>Installer command:</strong></p><pre>{e(device['installer_command'])}</pre>
   <p><strong>Installer path:</strong> <code>{e(installer_path)}</code></p>
+  <p><strong>Framework:</strong> <code>{e(framework)}</code></p>
   <p><strong>Platform:</strong> <code>{e(platform)}</code></p>
+  <p><strong>Model:</strong> <code>{e(llm_provider)} / {e(llm_model)}</code></p>
   <p><strong>Tools:</strong> <code>{e(', '.join(selected_tools))}</code></p>
   <p><strong>Runner:</strong> <code>{e(device['runner_path'])}</code></p>
   <p><a href="/">Back to dashboard</a></p>

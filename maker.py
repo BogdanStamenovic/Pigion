@@ -10,7 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 PLATFORMS_ROOT = PROJECT_ROOT / "platforms"
-RUNNER_TEMPLATE = PROJECT_ROOT / "platforms" / "core" / "whatchdog.py"
+DEFAULT_FRAMEWORK = "pigion"
 TOOL_ORDER = ("shell", "memadd", "search", "permamemory", "return", "askuser")
 
 TOOL_DOCS = {
@@ -29,16 +29,24 @@ TOOL_MODULE_NAMES = {
 
 def discover_tools() -> list[str]:
     tools: set[str] = set()
-    for platform in discover_platforms():
-        tools.update(discover_tools_for_platform(platform))
+    for framework in discover_frameworks():
+        for platform in discover_platforms(framework):
+            tools.update(discover_tools_for_platform(platform, framework))
     return sort_tools(tools)
 
 
-def discover_tools_for_platform(platform: str) -> list[str]:
-    tools: set[str] = set()
-    tools_dir = platform_tools_dir(platform)
+def discover_tools_for_platform(platform: str, framework: str | None = None) -> list[str]:
+    tools: list[str] = []
+    seen: set[str] = set()
+    for line in platform_tool_doc_lines(platform, framework):
+        tool = extract_tool_name_from_doc(line)
+        if tool and tool not in seen:
+            tools.append(tool)
+            seen.add(tool)
+
+    tools_dir = platform_tools_dir(platform, framework)
     if not tools_dir.exists():
-        return []
+        return tools
 
     for path in tools_dir.glob("*.py"):
         name = path.stem
@@ -46,8 +54,10 @@ def discover_tools_for_platform(platform: str) -> list[str]:
             continue
         if name == "return_value":
             name = "return"
-        tools.add(name)
-    return sort_tools(tools)
+        if name not in seen:
+            tools.append(name)
+            seen.add(name)
+    return tools
 
 
 def sort_tools(tools: set[str]) -> list[str]:
@@ -60,18 +70,87 @@ def sort_tools(tools: set[str]) -> list[str]:
     )
 
 
-def discover_platforms() -> list[str]:
+def normalize_framework(framework: str | None) -> str:
+    framework = (framework or DEFAULT_FRAMEWORK).strip().lower()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", framework):
+        raise ValueError(
+            "Framework name must be a valid Python package-style name: letters, "
+            "numbers, and underscores only, and it cannot start with a number."
+        )
+    return framework
+
+
+def discover_frameworks() -> list[str]:
     if not PLATFORMS_ROOT.exists():
+        return []
+    frameworks: set[str] = set()
+    for path in PLATFORMS_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+        child_platforms = any((child / "tools").is_dir() for child in path.iterdir() if child.is_dir())
+        if (path / "core").is_dir() or child_platforms:
+            frameworks.add(path.name)
+    return sorted(frameworks)
+
+
+def discover_platforms(framework: str | None = None) -> list[str]:
+    framework_dir = PLATFORMS_ROOT / normalize_framework(framework)
+    if not framework_dir.exists():
         return []
     return sorted(
         path.name
-        for path in PLATFORMS_ROOT.iterdir()
+        for path in framework_dir.iterdir()
         if path.is_dir() and (path / "tools").is_dir()
     )
 
 
-def platform_tools_dir(platform: str) -> Path:
-    return PLATFORMS_ROOT / platform / "tools"
+def framework_root(framework: str | None = None) -> Path:
+    return PLATFORMS_ROOT / normalize_framework(framework)
+
+
+def platform_root(platform: str, framework: str | None = None) -> Path:
+    return framework_root(framework) / platform
+
+
+def runner_template_path(framework: str | None = None) -> Path:
+    path = framework_root(framework) / "core" / "whatchdog.py"
+    if not path.exists():
+        raise FileNotFoundError(f"Framework runner template not found: {path}")
+    return path
+
+
+def platform_tools_dir(platform: str, framework: str | None = None) -> Path:
+    return platform_root(platform, framework) / "tools"
+
+
+def platform_td_path(platform: str, framework: str | None = None) -> Path:
+    return platform_root(platform, framework) / "exp" / "td.txt"
+
+
+def platform_tool_doc_lines(platform: str, framework: str | None = None) -> list[str]:
+    path = platform_td_path(platform, framework)
+    if not path.exists():
+        return []
+    try:
+        return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def extract_tool_name_from_doc(line: str) -> str | None:
+    stripped = re.sub(r"^\s*\d+\.\s*", "", line)
+    parts = [part.strip() for part in stripped.split(",")]
+    if len(parts) >= 3:
+        third = parts[2]
+        if " - " in third:
+            after = third.split(" - ", 1)[1]
+            tool = after.split(":", 1)[0].strip()
+            return tool or None
+
+    match = re.search(r"Command\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
+    if match:
+        return match.group(1)
+    return None
 
 
 def validate_instance_name(name: str) -> str:
@@ -138,7 +217,12 @@ def prompt_value(label: str, default: str | None = None) -> str:
     return value
 
 
-def prompt_platform(available_platforms: list[str], default: str = "laptop") -> str:
+def prompt_framework(available_frameworks: list[str], default: str = DEFAULT_FRAMEWORK) -> str:
+    default = default if default in available_frameworks else available_frameworks[0]
+    return choose_numbered("Available frameworks", available_frameworks, default)
+
+
+def prompt_platform(available_platforms: list[str], default: str = "linux") -> str:
     default = default if default in available_platforms else available_platforms[0]
     return choose_numbered("Available platforms", available_platforms, default)
 
@@ -167,7 +251,11 @@ def prompt_tools(available_tools: list[str]) -> list[str]:
     return normalize_tools(",".join(selected), available_tools)
 
 
-def render_tool_docs(selected_tools: list[str], platform: str | None = None) -> str:
+def render_tool_docs(
+    selected_tools: list[str],
+    platform: str | None = None,
+    framework: str | None = None,
+) -> str:
     """Build `exp/td.txt` content.
 
     Prefer a platform-provided `platform/exp/td.txt` if present, then ensure
@@ -178,40 +266,14 @@ def render_tool_docs(selected_tools: list[str], platform: str | None = None) -> 
 
     # Try to load platform-provided td.txt first
     if platform:
-        platform_td = PLATFORMS_ROOT / platform / "exp" / "td.txt"
-        try:
-            if platform_td.exists():
-                base_text = platform_td.read_text(encoding="utf-8")
-                base_lines = [ln for ln in base_text.splitlines() if ln.strip()]
-        except Exception:
-            base_lines = []
-
-    # Helper to extract the tool name from an existing doc line
-    def _extract_tool_name(line: str) -> str | None:
-        # Remove leading numbering like "1." if present
-        stripped = re.sub(r"^\s*\d+\.\s*", "", line)
-        parts = [p.strip() for p in stripped.split(",")]
-        if len(parts) >= 3:
-            third = parts[2]
-            if " - " in third:
-                try:
-                    after = third.split(" - ", 1)[1]
-                    tool = after.split(":", 1)[0].strip()
-                    return tool if tool else None
-                except Exception:
-                    pass
-
-        m = re.search(r"Command\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
-        if m:
-            return m.group(1)
-        return None
+        base_lines = platform_tool_doc_lines(platform, framework)
 
     # Build a mapping of existing tool -> doc (keep first occurrence)
     existing: dict[str, str] = {}
     selected_set = set(selected_tools)
     for ln in base_lines:
         doc_text = re.sub(r"^\s*\d+\.\s*", "", ln)
-        tool = _extract_tool_name(ln)
+        tool = extract_tool_name_from_doc(ln)
         if tool and tool in selected_set and (tool not in existing):
             existing[tool] = doc_text
 
@@ -230,7 +292,7 @@ def render_tool_docs(selected_tools: list[str], platform: str | None = None) -> 
     final_docs: list[str] = []
     # Add docs in the order they appeared in the platform file
     for ln in base_lines:
-        tool = _extract_tool_name(ln)
+        tool = extract_tool_name_from_doc(ln)
         if tool and tool in selected_set and tool in existing:
             final_docs.append(existing.pop(tool))
 
@@ -247,8 +309,8 @@ def render_tool_docs(selected_tools: list[str], platform: str | None = None) -> 
     return "\n".join(lines) + "\n"
 
 
-def detect_environment_values(platform: str) -> tuple[str, str]:
-    if platform == "laptop":
+def detect_environment_values(platform: str, framework: str | None = None) -> tuple[str, str]:
+    if platform in {"windows", "laptop"}:
         terminal = "powershell" if os.name == "nt" else Path(os.environ.get("SHELL", "bash")).name
         os_name = os.environ.get("OS", "Windows") if os.name == "nt" else os.uname().sysname
         return os_name, terminal
@@ -270,16 +332,16 @@ def render_environment(os_name: str, terminal: str) -> str:
     return f"OS: {os_name}\nTERMINAL: {terminal}\n"
 
 
-def prompt_environment(platform: str) -> str:
-    detected_os, detected_terminal = detect_environment_values(platform)
+def prompt_environment(platform: str, framework: str | None = None) -> str:
+    detected_os, detected_terminal = detect_environment_values(platform, framework)
     print("\nEnvironment for this instance:")
     os_name = prompt_value("OS", detected_os)
     terminal = prompt_value("Terminal", detected_terminal)
     return render_environment(os_name, terminal)
 
 
-def copy_runner(instance_name: str, target_dir: Path) -> Path:
-    runner_text = RUNNER_TEMPLATE.read_text(encoding="utf-8")
+def copy_runner(instance_name: str, target_dir: Path, framework: str | None = None) -> Path:
+    runner_text = runner_template_path(framework).read_text(encoding="utf-8")
     runner_text = runner_text.replace('NAME = "laptop"', f'NAME = "{instance_name}"')
     runner_text = runner_text.replace('NAME = "pi"', f'NAME = "{instance_name}"')
     runner_text = runner_text.replace("run_laptop", f"run_{instance_name}")
@@ -289,13 +351,21 @@ def copy_runner(instance_name: str, target_dir: Path) -> Path:
     return runner_path
 
 
-def copy_tools(platform: str, selected_tools: list[str], target_tools_dir: Path) -> None:
-    source_tools_dir = platform_tools_dir(platform)
+def copy_tools(
+    platform: str,
+    selected_tools: list[str],
+    target_tools_dir: Path,
+    framework: str | None = None,
+) -> None:
+    source_tools_dir = platform_tools_dir(platform, framework)
     for tool in selected_tools:
         module_name = TOOL_MODULE_NAMES.get(tool, f"{tool}.py")
         source = source_tools_dir / module_name
         if not source.exists():
-            raise FileNotFoundError(f"Tool '{tool}' does not exist for platform '{platform}': {source}")
+            raise FileNotFoundError(
+                f"Tool '{tool}' does not exist for framework '{normalize_framework(framework)}' "
+                f"platform '{platform}': {source}"
+            )
         shutil.copy2(source, target_tools_dir / module_name)
 
 
@@ -304,17 +374,27 @@ def create_instance(
     platform: str,
     selected_tools: list[str],
     *,
+    framework: str | None = None,
     environment_text: str | None = None,
     force: bool = False,
 ) -> Path:
     instance_name = validate_instance_name(instance_name)
+    framework = normalize_framework(framework)
     platform = platform.strip().lower()
-    available_platforms = discover_platforms()
+    available_frameworks = discover_frameworks()
+    if framework not in available_frameworks:
+        raise ValueError(
+            "Unknown framework: "
+            + framework
+            + ". Available frameworks: "
+            + ", ".join(available_frameworks)
+        )
+    available_platforms = discover_platforms(framework)
     if platform not in available_platforms:
         raise ValueError(
             "Unknown platform: "
             + platform
-            + ". Available platforms: "
+            + f" for framework {framework}. Available platforms: "
             + ", ".join(available_platforms)
         )
     if not selected_tools:
@@ -334,12 +414,12 @@ def create_instance(
     (target_dir / "__init__.py").write_text("", encoding="utf-8")
     (tools_dir / "__init__.py").write_text("", encoding="utf-8")
 
-    runner_path = copy_runner(instance_name, target_dir)
-    copy_tools(platform, selected_tools, tools_dir)
+    runner_path = copy_runner(instance_name, target_dir, framework)
+    copy_tools(platform, selected_tools, tools_dir, framework)
 
-    (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools, platform), encoding="utf-8")
+    (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools, platform, framework), encoding="utf-8")
     if environment_text is None:
-        environment_text = render_environment(*detect_environment_values(platform))
+        environment_text = render_environment(*detect_environment_values(platform, framework))
     (exp_dir / "enving.txt").write_text(environment_text, encoding="utf-8")
     (exp_dir / "tool_import.txt").write_text(" ".join(selected_tools) + "\n", encoding="utf-8")
 
@@ -352,12 +432,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("name", nargs="?", help="New Python package/instance name.")
     parser.add_argument(
+        "--framework",
+        default=DEFAULT_FRAMEWORK,
+        help="Framework wrapper to use. See platforms/<framework>/core and platforms/<framework>/<platform>.",
+    )
+    parser.add_argument(
         "--platform",
-        help="Platform tool template to copy from. See platforms/<name>/tools.",
+        help="Platform/runtime tool template to copy from. See platforms/<framework>/<platform>/tools.",
     )
     parser.add_argument(
         "--tools",
-        help="Comma-separated tools to include, or 'all'. If omitted interactively, defaults to all.",
+        help="Comma-separated tools to include, or 'all'. If omitted, uses discovered tools automatically.",
     )
     parser.add_argument(
         "--env-os",
@@ -377,9 +462,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    available_platforms = discover_platforms()
+    available_frameworks = discover_frameworks()
+    if not available_frameworks:
+        raise RuntimeError(f"No frameworks were discovered in {PLATFORMS_ROOT}.")
+
+    framework = normalize_framework(args.framework or prompt_framework(available_frameworks))
+    if framework not in available_frameworks:
+        raise RuntimeError(
+            f"Framework {framework!r} was not discovered. Available frameworks: {', '.join(available_frameworks)}"
+        )
+    available_platforms = discover_platforms(framework)
     if not available_platforms:
-        raise RuntimeError(f"No platforms were discovered in {PLATFORMS_ROOT}.")
+        raise RuntimeError(f"No platforms were discovered for framework {framework}.")
 
     available_tools = discover_tools()
     if not available_tools:
@@ -387,16 +481,16 @@ def main() -> None:
 
     instance_name = validate_instance_name(args.name or prompt_value("New instance name"))
     platform = (args.platform or prompt_platform(available_platforms)).strip().lower()
-    platform_tools = discover_tools_for_platform(platform)
-    selected_tools = normalize_tools(args.tools, platform_tools) if args.tools else prompt_tools(platform_tools)
-    detected_os, detected_terminal = detect_environment_values(platform)
+    platform_tools = discover_tools_for_platform(platform, framework)
+    selected_tools = normalize_tools(args.tools, platform_tools) if args.tools else list(platform_tools)
+    detected_os, detected_terminal = detect_environment_values(platform, framework)
     if args.env_os or args.env_terminal:
         environment_text = render_environment(
             args.env_os or detected_os,
             args.env_terminal or detected_terminal,
         )
     elif sys.stdin.isatty():
-        environment_text = prompt_environment(platform)
+        environment_text = prompt_environment(platform, framework)
     else:
         environment_text = render_environment(detected_os, detected_terminal)
 
@@ -404,12 +498,14 @@ def main() -> None:
         instance_name=instance_name,
         platform=platform,
         selected_tools=selected_tools,
+        framework=framework,
         environment_text=environment_text,
         force=args.force,
     )
 
     print("\nCreated Watchdog instance:")
     print(f"  name: {instance_name}")
+    print(f"  framework: {framework}")
     print(f"  platform template: {platform}")
     print(f"  tools: {', '.join(selected_tools)}")
     print("  environment:")

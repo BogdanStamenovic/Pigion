@@ -93,8 +93,10 @@ The setup scripts can create `.venv`, install requirements, write `.env`, and in
 At minimum, `.env` needs:
 
 ```env
-API_KEY="your-google-genai-key"
 ABS_PATH="/absolute/path/to/Pigion"
+LLM_PROVIDER="gemini"
+LLM_MODEL="gemini-2.5-flash-lite"
+LLM_API_KEY="your-model-api-key"
 ```
 
 Optional runtime settings:
@@ -102,6 +104,11 @@ Optional runtime settings:
 ```env
 SUDO_PASSWORD=""
 TEST_SUDO_PASSWORD=""
+GEMINI_API_KEY="your-google-genai-key"
+OPENAI_API_KEY="your-openai-key"
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OLLAMA_HOST="http://127.0.0.1:11434"
+API_KEY="legacy-google-genai-key"
 GEMINI_MODEL="gemini-2.5-flash-lite"
 LLM_TEMPERATURE="0.3"
 PIGION_ORCHESTRATOR_USER="admin"
@@ -192,16 +199,17 @@ The dashboard currently includes:
 The Register Device page does the first-pass provisioning work:
 
 1. Runs `git pull` in the project root.
-2. Asks the same core questions as `maker.py`: watchdog name, platform template, tools, OS, and terminal.
-3. Requires explicit tool selection; it does not auto-select every available tool.
-4. Prompts for the target device API token and sudo password.
-5. Prompts for the browser-facing `td.txt` capability block used by the orchestrator.
-6. Calls `maker.create_instance()` with the selected platform, selected tools, and entered environment text.
-7. Generates a UUID for the device.
-8. Stores the device in `server/devices.json`.
-9. Generates install endpoints under `/install/<uuid>...`.
-10. Adds a device command to `orchestrator/exp/td.txt`.
-11. Generates the matching `orchestrator/tools/device_DEVICE_NAME.py` module. The agent sees the device name in the command; the generated tool keeps the UUID internally.
+2. Asks the same core questions as `maker.py`: watchdog name, framework/runtime template, OS, and terminal.
+3. Discovers tools automatically from the selected framework/runtime `exp/td.txt` and tool files.
+4. Prompts for model provider, model name, model API key, Ollama host, and OpenAI base URL.
+5. Prompts for the target device sudo password.
+6. Optionally prompts for the browser-facing `td.txt` capability block used by the orchestrator; if left blank, the server builds one from the discovered tool docs.
+7. Calls `maker.create_instance()` with the selected framework/runtime, discovered tools, and entered environment text.
+8. Generates a UUID for the device.
+9. Stores the device in `server/devices.json`.
+10. Generates install endpoints under `/install/<uuid>...`.
+11. Adds a device command to `orchestrator/exp/td.txt`.
+12. Generates the matching `orchestrator/tools/device_DEVICE_NAME.py` module. The agent sees the device name in the command; the generated tool keeps the UUID internally.
 
 The generated orchestrator tool queues a goal for that device. The command name uses the registered device name, not the UUID. For example, after registering a device named `Bogdan`, the orchestrator may advertise:
 
@@ -242,11 +250,20 @@ The target `.env` is populated automatically from registration:
 ```env
 ABS_PATH="/opt/pigion/DEVICE_NAME"
 API_KEY="..."
+LLM_PROVIDER="gemini"
+LLM_MODEL="gemini-2.5-flash-lite"
+LLM_API_KEY="..."
+GEMINI_API_KEY="..."
+OPENAI_API_KEY="..."
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OLLAMA_HOST="http://127.0.0.1:11434"
 SUDO_PASSWORD="..."
 TEST_SUDO_PASSWORD="..."
 ```
 
-The sudo password is also used by the installer for its privileged setup steps. Because these values are embedded in the generated installer endpoint and stored in local JSON for now, treat `server/devices.json` and `/install/<uuid>.sh` as sensitive.
+For `LLM_PROVIDER=gemini`, use a Gemini model such as `gemini-2.5-flash-lite` and provide a model API key. For `LLM_PROVIDER=openai`, use an OpenAI chat model such as `gpt-4.1-mini` and provide a model API key. For `LLM_PROVIDER=ollama`, set `LLM_MODEL` to a local model name and `OLLAMA_HOST` to the reachable Ollama URL, for example `http://192.168.1.50:11434`; no model API key is required.
+
+The sudo password is also used by the installer for its privileged setup steps. Because model credentials, sudo credentials, and generated install settings are embedded in the generated installer endpoint and stored in local JSON for now, treat `server/devices.json` and `/install/<uuid>.sh` as sensitive.
 
 The generated device-side `client.py`:
 
@@ -422,9 +439,16 @@ Similarity is local and simple: fields are tokenized into sparse vectors and com
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `API_KEY` | none | Google GenAI API key. |
 | `ABS_PATH` | required | Project root. The runner appends `pi`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Model used for runner prompts. |
+| `LLM_PROVIDER` | `gemini` | Model backend: `gemini`, `openai`, or `ollama`. |
+| `LLM_MODEL` | provider-specific | Model used for runner prompts. Defaults to `gemini-2.5-flash-lite`, `gpt-4.1-mini`, or `llama3.1`. |
+| `LLM_API_KEY` | none | Provider-neutral model API key used by Gemini/OpenAI. |
+| `GEMINI_API_KEY` | none | Gemini API key. Preferred over `LLM_API_KEY` for Gemini when set. |
+| `OPENAI_API_KEY` | none | OpenAI API key. Preferred over `LLM_API_KEY` for OpenAI when set. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat completions base URL. |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL or IP/port for local models. |
+| `API_KEY` | none | Legacy fallback API key, still accepted for Gemini/OpenAI compatibility. |
+| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Legacy Gemini model fallback when `LLM_MODEL` is unset. |
 | `LLM_TEMPERATURE` | `0.3` | Generation temperature. |
 | `MAX_OUTPUT_TOKENS` | `700` | Max model output tokens per call. |
 | `MAX_ACTIONS_PER_STEP` | `12` | Action rounds per plan step. |
