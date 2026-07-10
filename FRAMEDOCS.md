@@ -23,6 +23,7 @@ Every framework wrapper must use this shape:
 platforms/<framework>/
   core/whatchdog.py
   <runtime>/
+    framework.json
     exp/td.txt
     tools/
       __init__.py
@@ -105,6 +106,40 @@ For the special `return` command, the Python file must be `return_value.py` and 
 
 Other frameworks may adapt internally, but the copied runner must still finish through `run_agent(goal)` and return a final result to `client.py`.
 
+## Framework Questions Contract
+
+A runtime may ask registration-time questions by adding:
+
+```text
+platforms/<framework>/<runtime>/framework.json
+```
+
+The file is optional. When present, `maker.py` and the web registration page read a top-level `questions` list:
+
+```json
+{
+  "description": "Short capability summary.",
+  "questions": [
+    {
+      "name": "FRAMEWORK_ENV_KEY",
+      "label": "Question shown to the user",
+      "default": "default value",
+      "required": true,
+      "options": ["optional", "select", "values"],
+      "help": "Optional extra context."
+    }
+  ]
+}
+```
+
+`name` must be a valid environment-variable style identifier. The web server writes the selected answers into the generated installer `.env`; `maker.py` writes them to `<device>/exp/framework_env.txt` for locally generated packages. Framework runners should load those values themselves and translate them into whatever their upstream library expects.
+
+CLI generation can provide answers non-interactively:
+
+```text
+python3 -m maker researcher --framework gpt_researcher --platform linux --framework-env GPT_RESEARCHER_LLM_MODEL=llama3.1
+```
+
 ## Tool Documentation Contract
 
 Each runtime should provide:
@@ -149,3 +184,23 @@ Before adding a new framework wrapper, make sure:
 - The final runner return value is JSON-serializable or stringifiable.
 - Runtime dependencies are listed in the repo `requirements.txt` or installed by the wrapper at runtime.
 - `python -m py_compile maker.py server/server.py platforms/<framework>/core/whatchdog.py` passes.
+
+## GPT Researcher Wrapper
+
+The `gpt_researcher/linux` wrapper is a research framework option. Its intended stack is:
+
+- LLM: the model chosen at registration.
+- Inference: Ollama.
+- Embeddings: `nomic-embed-text` through Ollama.
+- Search: SearXNG/Searx via GPT Researcher's `RETRIEVER=searx`.
+- Browser: Playwright.
+- Extraction: Trafilatura by default, or Crawl4AI when selected.
+- Vector DB: Qdrant when `GPT_RESEARCHER_QDRANT_URL` is set.
+
+The wrapper auto-installs missing Python packages inside the generated watchdog venv on first run, installs the Playwright browser, and best-effort pulls the configured Ollama LLM and embedding model when the `ollama` CLI is available. Set these for verification-only runs:
+
+```text
+PIGION_GPT_RESEARCHER_DRY_RUN=1
+PIGION_GPT_RESEARCHER_SKIP_DEP_INSTALL=1
+PIGION_GPT_RESEARCHER_SKIP_OLLAMA_PULL=1
+```

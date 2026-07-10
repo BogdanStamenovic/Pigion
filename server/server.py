@@ -24,6 +24,8 @@ from maker import (
     discover_frameworks,
     discover_platforms,
     discover_tools_for_platform,
+    framework_env_questions,
+    framework_metadata,
     render_tool_docs,
     render_environment,
 )
@@ -467,12 +469,65 @@ def parse_framework_platform(raw_value: str) -> tuple[str, str]:
 
 
 def default_capability_block(framework: str, platform: str, selected_tools: list[str]) -> str:
+    metadata = framework_metadata(platform, framework)
+    description = str(metadata.get("description") or "").strip()
     tool_docs = " ".join(render_tool_docs(selected_tools, platform, framework).split())
     return (
         f"{framework}/{platform} watchdog device. "
+        f"{description + ' ' if description else ''}"
         f"Automatically discovered tools: {', '.join(selected_tools)}. "
         f"Tool docs: {tool_docs}"
     ).strip()
+
+
+def normalize_extra_env(raw_values: dict[str, str], framework: str, platform: str) -> dict[str, str]:
+    answers: dict[str, str] = {}
+    for question in framework_env_questions(platform, framework):
+        name = str(question["name"])
+        value = raw_values.get(f"framework_env__{name}", "")
+        if value == "" and question.get("default") is not None:
+            value = str(question.get("default") or "")
+        if question.get("required") and value == "":
+            label = str(question.get("label") or name)
+            raise ValueError(f"{label} is required for {framework}/{platform}.")
+        answers[name] = value
+    return answers
+
+
+def shell_env_assignment(key: str, value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise ValueError(f"Invalid env key: {key}")
+    return f"{key}={shlex.quote(str(value))}"
+
+
+def framework_question_inputs(framework: str, platform: str) -> str:
+    questions = framework_env_questions(platform, framework)
+    if not questions:
+        return "<p class='muted'>No framework-specific questions.</p>"
+
+    fields: list[str] = []
+    for question in questions:
+        name = str(question["name"])
+        label = str(question.get("label") or name)
+        default = str(question.get("default") or "")
+        help_text = str(question.get("help") or "")
+        input_name = f"framework_env__{name}"
+        options = question.get("options")
+        if isinstance(options, list) and options:
+            option_tags = []
+            for option in options:
+                option_text = str(option)
+                selected = " selected" if option_text == default else ""
+                option_tags.append(f"<option value='{e(option_text)}'{selected}>{e(option_text)}</option>")
+            control = f"<select name='{e(input_name)}'>{''.join(option_tags)}</select>"
+        else:
+            input_type = "password" if question.get("secret") else "text"
+            control = f"<input name='{e(input_name)}' value='{e(default)}' type='{input_type}'>"
+        fields.append(
+            f"<label>{e(label)}</label>{control}"
+            + (f"<p class='muted'>{e(help_text)}</p>" if help_text else "")
+        )
+    return "".join(fields)
 
 
 def normalize_llm_provider(raw_value: str) -> str:
@@ -643,6 +698,22 @@ def write_install_script(device: dict[str, Any]) -> str:
     llm_model = str(device.get("llm_model") or default_llm_model(llm_provider))
     ollama_host = str(device.get("ollama_host") or "http://127.0.0.1:11434")
     openai_base_url = str(device.get("openai_base_url") or "https://api.openai.com/v1")
+    extra_env = {str(key): str(value) for key, value in dict(device.get("framework_env") or {}).items()}
+    env_lines = [
+        shell_env_assignment("ABS_PATH", "__PIGION_INSTALL_DIR__"),
+        shell_env_assignment("API_KEY", api_token),
+        shell_env_assignment("LLM_PROVIDER", llm_provider),
+        shell_env_assignment("LLM_MODEL", llm_model),
+        shell_env_assignment("LLM_API_KEY", api_token),
+        shell_env_assignment("GEMINI_API_KEY", api_token),
+        shell_env_assignment("OPENAI_API_KEY", api_token),
+        shell_env_assignment("OPENAI_BASE_URL", openai_base_url),
+        shell_env_assignment("OLLAMA_HOST", ollama_host),
+        shell_env_assignment("SUDO_PASSWORD", sudo_password),
+        shell_env_assignment("TEST_SUDO_PASSWORD", sudo_password),
+    ]
+    env_lines.extend(shell_env_assignment(key, value) for key, value in sorted(extra_env.items()))
+    env_file_body = "\n".join(env_lines)
     return textwrap.dedent(
         f"""#!/usr/bin/env bash
         set -euo pipefail
@@ -706,19 +777,10 @@ def write_install_script(device: dict[str, Any]) -> str:
         run_sudo "$VENV_PYTHON" -m pip install -r "$INSTALL_DIR/requirements.txt"
 
         TMP_ENV="$TMP_DIR/pigion.env"
-        cat > "$TMP_ENV" <<EOF
-ABS_PATH="$INSTALL_DIR"
-API_KEY="$DEVICE_API_TOKEN"
-LLM_PROVIDER="$DEVICE_LLM_PROVIDER"
-LLM_MODEL="$DEVICE_LLM_MODEL"
-LLM_API_KEY="$DEVICE_API_TOKEN"
-GEMINI_API_KEY="$DEVICE_API_TOKEN"
-OPENAI_API_KEY="$DEVICE_API_TOKEN"
-OPENAI_BASE_URL="$DEVICE_OPENAI_BASE_URL"
-OLLAMA_HOST="$DEVICE_OLLAMA_HOST"
-SUDO_PASSWORD="$DEVICE_SUDO_PASSWORD"
-TEST_SUDO_PASSWORD="$DEVICE_SUDO_PASSWORD"
-EOF
+        cat > "$TMP_ENV" <<'EOF_ENV'
+{env_file_body}
+EOF_ENV
+        sed -i "s|ABS_PATH=__PIGION_INSTALL_DIR__|ABS_PATH=\\"$INSTALL_DIR\\"|" "$TMP_ENV"
         run_sudo install -m 0600 "$TMP_ENV" "$INSTALL_DIR/.env"
 
         TMP_UNINSTALL="$TMP_DIR/uninstall.sh"
@@ -975,8 +1037,16 @@ def register_page(request: Request) -> str:
             except Exception:
                 default_os, default_terminal = "", ""
             tool_docs = render_tool_docs(tools, platform, framework) if tools else ""
+            metadata = framework_metadata(platform, framework)
+            description = str(metadata.get("description") or "").strip()
+            question_html = framework_question_inputs(framework, platform)
             platform_blocks.append(
-                f"<section><h3>{e(framework)}/{e(platform)} discovered tools</h3><p><code>{e(', '.join(tools) or 'none')}</code></p>{f'<pre>{e(tool_docs)}</pre>' if tool_docs else '<p class=\"muted\">No tools found.</p>'}<p class='muted'>Suggested OS: {e(default_os)}; terminal: {e(default_terminal)}</p></section>"
+                f"<section><h3>{e(framework)}/{e(platform)} discovered tools</h3>"
+                f"{f'<p>{e(description)}</p>' if description else ''}"
+                f"<p><code>{e(', '.join(tools) or 'none')}</code></p>"
+                f"{f'<pre>{e(tool_docs)}</pre>' if tool_docs else '<p class=\"muted\">No tools found.</p>'}"
+                f"<p class='muted'>Suggested OS: {e(default_os)}; terminal: {e(default_terminal)}</p>"
+                f"<h4>Framework questions</h4>{question_html}</section>"
             )
     return layout(
         "Register Device",
@@ -1029,6 +1099,10 @@ async def register(request: Request) -> str:
     openai_base_url = data.get("openai_base_url", "").strip() or "https://api.openai.com/v1"
     sudo_password = data.get("sudo_password", "")
     capability_block = data.get("capability_block", "").strip()
+    try:
+        framework_env = normalize_extra_env(data, framework, platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if llm_provider in {"gemini", "openai"} and not api_token:
         raise HTTPException(status_code=400, detail="Model API key is required for Gemini and OpenAI.")
     selected_tools = discover_tools_for_platform(platform, framework)
@@ -1048,6 +1122,7 @@ async def register(request: Request) -> str:
             selected_tools,
             framework=framework,
             environment_text=environment_text,
+            framework_env=framework_env,
             force=True,
         )
     except ValueError as exc:
@@ -1074,6 +1149,7 @@ async def register(request: Request) -> str:
         "llm_model": llm_model,
         "ollama_host": ollama_host,
         "openai_base_url": openai_base_url,
+        "framework_env": framework_env,
         "api_token": api_token,
         "sudo_password": sudo_password,
         "capability_block": capability_block,

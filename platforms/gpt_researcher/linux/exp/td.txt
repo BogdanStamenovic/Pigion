@@ -1,0 +1,1 @@
+1.Research, Description: Runs a GPT Researcher deep-research task with Ollama inference, SearXNG search, Playwright browsing, and configured extraction/memory backends, Command - research:TOPIC, Example - research:Compare local-first AI research stacks

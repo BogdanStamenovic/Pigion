@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -125,6 +126,26 @@ def platform_tools_dir(platform: str, framework: str | None = None) -> Path:
 
 def platform_td_path(platform: str, framework: str | None = None) -> Path:
     return platform_root(platform, framework) / "exp" / "td.txt"
+
+
+def framework_metadata_path(platform: str, framework: str | None = None) -> Path:
+    return platform_root(platform, framework) / "framework.json"
+
+
+def framework_metadata(platform: str, framework: str | None = None) -> dict:
+    path = framework_metadata_path(platform, framework)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def framework_env_questions(platform: str, framework: str | None = None) -> list[dict]:
+    questions = framework_metadata(platform, framework).get("questions", [])
+    return [item for item in questions if isinstance(item, dict) and item.get("name")]
 
 
 def platform_tool_doc_lines(platform: str, framework: str | None = None) -> list[str]:
@@ -332,6 +353,42 @@ def render_environment(os_name: str, terminal: str) -> str:
     return f"OS: {os_name}\nTERMINAL: {terminal}\n"
 
 
+def normalize_framework_env(raw_values: list[str] | None) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for item in raw_values or []:
+        if "=" not in item:
+            raise ValueError(f"Framework env values must use KEY=VALUE syntax: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"Invalid framework env key: {key}")
+        values[key] = value
+    return values
+
+
+def prompt_framework_env(platform: str, framework: str | None = None) -> dict[str, str]:
+    questions = framework_env_questions(platform, framework)
+    if not questions:
+        return {}
+
+    print("\nFramework questions:")
+    values: dict[str, str] = {}
+    for question in questions:
+        name = str(question["name"])
+        label = str(question.get("label") or name)
+        default = str(question.get("default") or "")
+        required = bool(question.get("required", False))
+        value = prompt_value(label, default)
+        if required and not value:
+            raise ValueError(f"{label} is required for {normalize_framework(framework)}/{platform}.")
+        values[name] = value
+    return values
+
+
+def render_framework_env(values: dict[str, str]) -> str:
+    return "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
+
+
 def prompt_environment(platform: str, framework: str | None = None) -> str:
     detected_os, detected_terminal = detect_environment_values(platform, framework)
     print("\nEnvironment for this instance:")
@@ -376,6 +433,7 @@ def create_instance(
     *,
     framework: str | None = None,
     environment_text: str | None = None,
+    framework_env: dict[str, str] | None = None,
     force: bool = False,
 ) -> Path:
     instance_name = validate_instance_name(instance_name)
@@ -421,6 +479,8 @@ def create_instance(
     if environment_text is None:
         environment_text = render_environment(*detect_environment_values(platform, framework))
     (exp_dir / "enving.txt").write_text(environment_text, encoding="utf-8")
+    if framework_env:
+        (exp_dir / "framework_env.txt").write_text(render_framework_env(framework_env), encoding="utf-8")
     (exp_dir / "tool_import.txt").write_text(" ".join(selected_tools) + "\n", encoding="utf-8")
 
     return runner_path
@@ -456,6 +516,13 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Replace an existing generated instance directory.",
+    )
+    parser.add_argument(
+        "--framework-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Set a framework-specific generated env value. Repeat for multiple values.",
     )
     return parser.parse_args()
 
@@ -493,6 +560,9 @@ def main() -> None:
         environment_text = prompt_environment(platform, framework)
     else:
         environment_text = render_environment(detected_os, detected_terminal)
+    framework_env = normalize_framework_env(args.framework_env)
+    if not framework_env and sys.stdin.isatty():
+        framework_env = prompt_framework_env(platform, framework)
 
     runner_path = create_instance(
         instance_name=instance_name,
@@ -500,6 +570,7 @@ def main() -> None:
         selected_tools=selected_tools,
         framework=framework,
         environment_text=environment_text,
+        framework_env=framework_env,
         force=args.force,
     )
 
@@ -511,6 +582,10 @@ def main() -> None:
     print("  environment:")
     for line in environment_text.strip().splitlines():
         print(f"    {line}")
+    if framework_env:
+        print("  framework env:")
+        for key, value in sorted(framework_env.items()):
+            print(f"    {key}={value}")
     print(f"  runner: {runner_path.relative_to(PROJECT_ROOT)}")
     print("\nRun it with:")
     print(f"  python {runner_path.relative_to(PROJECT_ROOT)}")
