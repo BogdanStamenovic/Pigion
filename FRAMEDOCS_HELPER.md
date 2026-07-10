@@ -92,6 +92,9 @@ Webserver integration expectations:
 - It must render framework-specific questions from framework.json.
 - POST /register must validate required framework questions.
 - The generated installer must write framework answers into the installed .env.
+- Linux runtimes should receive a bash installer and tgz bundle; Windows runtimes should receive a PowerShell installer and zip bundle.
+- Windows installers should create a venv, write .env, create watchdog.ps1/uninstall.ps1, register a scheduled task, and start it immediately.
+- Generated clients must launch the platform uninstall script for removal jobs.
 - server/devices.json should store framework, platform, selected_tools, runner_module, and framework_env.
 - default capability text should mention the framework description and discovered tools.
 

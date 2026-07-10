@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import textwrap
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
@@ -449,7 +450,17 @@ def server_url() -> str:
     return str(config().get("server_url", "http://127.0.0.1:8000")).rstrip("/")
 
 
-def install_command(device_uuid: str) -> str:
+def is_windows_platform(platform: str | None) -> bool:
+    return str(platform or "").strip().lower() in {"windows", "win32", "win"}
+
+
+def install_command(device_uuid: str, platform: str | None = None) -> str:
+    if is_windows_platform(platform):
+        script_url = f"{server_url()}/install/{device_uuid}.ps1"
+        return (
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+            f"\"iex (iwr -UseBasicParsing '{script_url}').Content\""
+        )
     return f"curl -fsSL {server_url()}/install/{device_uuid}.sh | bash"
 
 
@@ -498,6 +509,36 @@ def shell_env_assignment(key: str, value: str) -> str:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         raise ValueError(f"Invalid env key: {key}")
     return f"{key}={shlex.quote(str(value))}"
+
+
+def dotenv_assignment(key: str, value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise ValueError(f"Invalid env key: {key}")
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
+
+
+def powershell_single_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def device_env_values(device: dict[str, Any]) -> dict[str, str]:
+    llm_provider = normalize_llm_provider(str(device.get("llm_provider", "gemini")))
+    values = {
+        "ABS_PATH": "__PIGION_INSTALL_DIR__",
+        "API_KEY": str(device.get("api_token", "")),
+        "LLM_PROVIDER": llm_provider,
+        "LLM_MODEL": str(device.get("llm_model") or default_llm_model(llm_provider)),
+        "LLM_API_KEY": str(device.get("api_token", "")),
+        "GEMINI_API_KEY": str(device.get("api_token", "")),
+        "OPENAI_API_KEY": str(device.get("api_token", "")),
+        "OPENAI_BASE_URL": str(device.get("openai_base_url") or "https://api.openai.com/v1"),
+        "OLLAMA_HOST": str(device.get("ollama_host") or "http://127.0.0.1:11434"),
+        "SUDO_PASSWORD": str(device.get("sudo_password", "")),
+        "TEST_SUDO_PASSWORD": str(device.get("sudo_password", "")),
+    }
+    values.update({str(key): str(value) for key, value in dict(device.get("framework_env") or {}).items()})
+    return values
 
 
 def framework_question_inputs(framework: str, platform: str) -> str:
@@ -567,6 +608,19 @@ def get_device_or_404(device_uuid: str) -> dict[str, Any]:
 
 
 def write_device_client(device: dict[str, Any]) -> str:
+    if is_windows_platform(str(device.get("platform", ""))):
+        uninstall_command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "__SCRIPT__",
+        ]
+        uninstall_script = "uninstall.ps1"
+    else:
+        uninstall_command = ["bash", "__SCRIPT__"]
+        uninstall_script = "uninstall.sh"
     return textwrap.dedent(
         f"""
         from __future__ import annotations
@@ -618,11 +672,13 @@ def write_device_client(device: dict[str, Any]) -> str:
 
 
         def start_uninstall() -> str:
-            script = Path(__file__).resolve().parent / "uninstall.sh"
+            script = Path(__file__).resolve().parent / {uninstall_script!r}
             if not script.exists():
                 raise RuntimeError(f"Uninstall script not found: {{script}}")
+            command = {uninstall_command!r}
+            command = [str(script) if item == "__SCRIPT__" else item for item in command]
             subprocess.Popen(
-                ["bash", str(script)],
+                command,
                 cwd=str(script.parent),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -692,27 +748,8 @@ def write_install_script(device: dict[str, Any]) -> str:
     device_name = device["name"]
     device_uuid = device["uuid"]
     unit_name = f"pigion_{device_name}"
-    api_token = str(device.get("api_token", ""))
     sudo_password = str(device.get("sudo_password", ""))
-    llm_provider = normalize_llm_provider(str(device.get("llm_provider", "gemini")))
-    llm_model = str(device.get("llm_model") or default_llm_model(llm_provider))
-    ollama_host = str(device.get("ollama_host") or "http://127.0.0.1:11434")
-    openai_base_url = str(device.get("openai_base_url") or "https://api.openai.com/v1")
-    extra_env = {str(key): str(value) for key, value in dict(device.get("framework_env") or {}).items()}
-    env_lines = [
-        shell_env_assignment("ABS_PATH", "__PIGION_INSTALL_DIR__"),
-        shell_env_assignment("API_KEY", api_token),
-        shell_env_assignment("LLM_PROVIDER", llm_provider),
-        shell_env_assignment("LLM_MODEL", llm_model),
-        shell_env_assignment("LLM_API_KEY", api_token),
-        shell_env_assignment("GEMINI_API_KEY", api_token),
-        shell_env_assignment("OPENAI_API_KEY", api_token),
-        shell_env_assignment("OPENAI_BASE_URL", openai_base_url),
-        shell_env_assignment("OLLAMA_HOST", ollama_host),
-        shell_env_assignment("SUDO_PASSWORD", sudo_password),
-        shell_env_assignment("TEST_SUDO_PASSWORD", sudo_password),
-    ]
-    env_lines.extend(shell_env_assignment(key, value) for key, value in sorted(extra_env.items()))
+    env_lines = [shell_env_assignment(key, value) for key, value in sorted(device_env_values(device).items())]
     env_file_body = "\n".join(env_lines)
     return textwrap.dedent(
         f"""#!/usr/bin/env bash
@@ -872,6 +909,110 @@ EOF_UNINSTALL
     ).lstrip().replace("\n        ", "\n")
 
 
+def write_windows_install_script(device: dict[str, Any]) -> str:
+    device_name = str(device["name"])
+    device_uuid = str(device["uuid"])
+    task_name = f"Pigion_{device_name}"
+    env_lines = [dotenv_assignment(key, value) for key, value in sorted(device_env_values(device).items())]
+    env_file_body = "\r\n".join(env_lines)
+    return textwrap.dedent(
+        f"""
+        $ErrorActionPreference = "Stop"
+
+        $DeviceName = {powershell_single_quote(device_name)}
+        $DeviceUuid = {powershell_single_quote(device_uuid)}
+        $ServerUrl = {powershell_single_quote(server_url())}
+        $TaskName = {powershell_single_quote(task_name)}
+        $InstallRoot = if ($env:PIGION_INSTALL_ROOT) {{ $env:PIGION_INSTALL_ROOT }} else {{ Join-Path $env:LOCALAPPDATA "Pigion" }}
+        $InstallDir = Join-Path $InstallRoot $DeviceName
+        $VenvDir = Join-Path $InstallDir ".venv"
+        $VenvPython = Join-Path $VenvDir "Scripts\\python.exe"
+        $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pigion-" + [System.Guid]::NewGuid().ToString("N"))
+
+        function Write-Utf8NoBom {{
+            param([string]$Path, [string]$Text)
+            [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        }}
+
+        function Find-Python {{
+            $configured = $env:PYTHON_BIN
+            if ($configured -and (Get-Command $configured -ErrorAction SilentlyContinue)) {{ return $configured }}
+            foreach ($candidate in @("py", "python", "python3")) {{
+                if (Get-Command $candidate -ErrorAction SilentlyContinue) {{ return $candidate }}
+            }}
+            throw "Python is required but was not found. Install Python 3 and rerun this installer."
+        }}
+
+        New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+        try {{
+            $BundleZip = Join-Path $TempDir "pigion-watchdog.zip"
+            $ClientPy = Join-Path $TempDir "client.py"
+            Invoke-WebRequest -UseBasicParsing -Uri "$ServerUrl/install/$DeviceUuid/bundle.zip" -OutFile $BundleZip
+            Invoke-WebRequest -UseBasicParsing -Uri "$ServerUrl/install/$DeviceUuid/client.py" -OutFile $ClientPy
+
+            if (Test-Path (Join-Path $TempDir "bundle")) {{ Remove-Item -Recurse -Force (Join-Path $TempDir "bundle") }}
+            Expand-Archive -Force -Path $BundleZip -DestinationPath (Join-Path $TempDir "bundle")
+            Copy-Item -Recurse -Force (Join-Path $TempDir "bundle\\*") $InstallDir
+            Copy-Item -Force $ClientPy (Join-Path $InstallDir "client.py")
+
+            $PythonBin = Find-Python
+            & $PythonBin -m venv $VenvDir
+            & $VenvPython -m pip install --upgrade pip
+            & $VenvPython -m pip install -r (Join-Path $InstallDir "requirements.txt")
+
+            $EnvText = @'
+{env_file_body}
+'@
+            $SafeInstallDir = $InstallDir -replace '"', '\\"'
+            $EnvText = $EnvText -replace 'ABS_PATH="__PIGION_INSTALL_DIR__"', ('ABS_PATH="' + $SafeInstallDir + '"')
+            Write-Utf8NoBom -Path (Join-Path $InstallDir ".env") -Text ($EnvText.TrimEnd() + "`r`n")
+
+            $MonitorScript = @'
+$ErrorActionPreference = "Continue"
+$InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Python = Join-Path $InstallDir ".venv\\Scripts\\python.exe"
+$Client = Join-Path $InstallDir "client.py"
+Set-Location $InstallDir
+while ($true) {{
+    & $Python $Client
+    Start-Sleep -Seconds 5
+}}
+'@
+            Write-Utf8NoBom -Path (Join-Path $InstallDir "watchdog.ps1") -Text $MonitorScript
+
+            $UninstallScript = @"
+$ErrorActionPreference = "Continue"
+`$InstallDir = Split-Path -Parent `$MyInvocation.MyCommand.Path
+`$TaskName = "$TaskName"
+Start-Sleep -Seconds 5
+Unregister-ScheduledTask -TaskName `$TaskName -Confirm:`$false -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" | Where-Object {{ `$_.CommandLine -like "*`$InstallDir*" }} | ForEach-Object {{ Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }}
+`$Parent = Split-Path -Parent `$InstallDir
+Remove-Item -Recurse -Force `$InstallDir -ErrorAction SilentlyContinue
+if (Test-Path `$Parent) {{
+    try {{
+        if (-not (Get-ChildItem -Force `$Parent -ErrorAction SilentlyContinue)) {{ Remove-Item -Force `$Parent -ErrorAction SilentlyContinue }}
+    }} catch {{}}
+}}
+"@
+            Write-Utf8NoBom -Path (Join-Path $InstallDir "uninstall.ps1") -Text $UninstallScript
+
+            $TaskAction = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallDir\\watchdog.ps1`""
+            schtasks.exe /Create /TN $TaskName /TR $TaskAction /SC ONLOGON /F | Out-Host
+            schtasks.exe /Run /TN $TaskName | Out-Host
+
+            Write-Host "Installed $TaskName"
+            Write-Host "Install dir: $InstallDir"
+            Write-Host "Status: schtasks /Query /TN $TaskName"
+        }} finally {{
+            Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
+        }}
+        """
+    ).lstrip().replace("\n        ", "\n")
+
+
 def build_device_bundle(device: dict[str, Any]) -> bytes:
     runner_path = PROJECT_ROOT / device["runner_path"]
     package_dir = runner_path.parent
@@ -884,6 +1025,24 @@ def build_device_bundle(device: dict[str, Any]) -> bytes:
         requirements = PROJECT_ROOT / "requirements.txt"
         if requirements.exists():
             archive.add(requirements, arcname="requirements.txt")
+    output.seek(0)
+    return output.read()
+
+
+def build_device_zip_bundle(device: dict[str, Any]) -> bytes:
+    runner_path = PROJECT_ROOT / device["runner_path"]
+    package_dir = runner_path.parent
+    if not package_dir.exists():
+        raise HTTPException(status_code=404, detail="Generated watchdog package not found")
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in package_dir.rglob("*"):
+            if path.is_file():
+                archive.write(path, arcname=str(path.relative_to(package_dir.parent)))
+        requirements = PROJECT_ROOT / "requirements.txt"
+        if requirements.exists():
+            archive.write(requirements, arcname="requirements.txt")
     output.seek(0)
     return output.read()
 
@@ -1135,7 +1294,8 @@ async def register(request: Request) -> str:
     runner_module = f"{name}.run_{name}"
     installer_dir = SERVER_ROOT / "installers"
     installer_dir.mkdir(parents=True, exist_ok=True)
-    installer_path = installer_dir / f"install_{name}_{short}.sh"
+    installer_suffix = "ps1" if is_windows_platform(platform) else "sh"
+    installer_path = installer_dir / f"install_{name}_{short}.{installer_suffix}"
     device = {
         "uuid": device_uuid,
         "name": name,
@@ -1162,9 +1322,10 @@ async def register(request: Request) -> str:
         "installer_path": str(installer_path),
         "git_pull_output": (pull.stdout or pull.stderr).strip(),
     }
-    installer_path.write_text(write_install_script(device), encoding="utf-8")
+    installer_text = write_windows_install_script(device) if is_windows_platform(platform) else write_install_script(device)
+    installer_path.write_text(installer_text, encoding="utf-8")
     installer_path.chmod(0o755)
-    device["installer_command"] = install_command(device_uuid)
+    device["installer_command"] = install_command(device_uuid, platform)
     devices_doc = read_json(DEVICES_PATH, {"devices": {}})
     devices_doc.setdefault("devices", {})[device_uuid] = device
     write_json(DEVICES_PATH, devices_doc)
@@ -1342,6 +1503,11 @@ def generated_install_script(device_uuid: str) -> str:
     return write_install_script(get_device_or_404(device_uuid))
 
 
+@app.get("/install/{device_uuid}.ps1", response_class=PlainTextResponse)
+def generated_windows_install_script(device_uuid: str) -> str:
+    return write_windows_install_script(get_device_or_404(device_uuid))
+
+
 @app.get("/install/{device_uuid}/client.py", response_class=PlainTextResponse)
 def generated_client(device_uuid: str) -> str:
     return write_device_client(get_device_or_404(device_uuid))
@@ -1354,4 +1520,14 @@ def generated_bundle(device_uuid: str) -> StreamingResponse:
         io.BytesIO(bundle),
         media_type="application/gzip",
         headers={"Content-Disposition": f'attachment; filename="pigion-{device_uuid}.tgz"'},
+    )
+
+
+@app.get("/install/{device_uuid}/bundle.zip")
+def generated_zip_bundle(device_uuid: str) -> StreamingResponse:
+    bundle = build_device_zip_bundle(get_device_or_404(device_uuid))
+    return StreamingResponse(
+        io.BytesIO(bundle),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="pigion-{device_uuid}.zip"'},
     )

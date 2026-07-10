@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +33,9 @@ def _parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, raw_value = line.split("=", 1)
         key = key.strip()
-        try:
-            parts = shlex.split(raw_value, posix=True)
-            value = parts[0] if parts else ""
-        except ValueError:
-            value = raw_value.strip().strip('"').strip("'")
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
         values[key] = value
     return values
 

@@ -231,10 +231,16 @@ curl -X POST http://127.0.0.1:8000/api/orchestrator/goals \
   -d '{"goal":"Check which registered device should handle this."}'
 ```
 
-The final registration page prints an installer command:
+The final registration page prints an installer command. Linux/runtime registrations use:
 
 ```bash
 curl -fsSL http://127.0.0.1:8000/install/<device_uuid>.sh | bash
+```
+
+Windows/runtime registrations use PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (iwr -UseBasicParsing 'http://127.0.0.1:8000/install/<device_uuid>.ps1').Content"
 ```
 
 Set `PIGION_SERVER_URL` to the reachable host name before registering devices if the device should install from another machine, for example:
@@ -243,7 +249,9 @@ Set `PIGION_SERVER_URL` to the reachable host name before registering devices if
 PIGION_SERVER_URL="http://100.x.y.z:8000"
 ```
 
-The generated `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/opt/pigion/DEVICE_NAME/uninstall.sh`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs as the installing user, starts from that user's home directory, and keeps the code/config under `/opt/pigion/DEVICE_NAME` by default. Override that install location with `PIGION_INSTALL_ROOT` when running the installer.
+The generated Linux `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/opt/pigion/DEVICE_NAME/uninstall.sh`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs as the installing user, starts from that user's home directory, and keeps the code/config under `/opt/pigion/DEVICE_NAME` by default. Override that install location with `PIGION_INSTALL_ROOT` when running the installer.
+
+The generated Windows `install.ps1` downloads a zip bundle and per-device `client.py`, creates a virtual environment at `%LOCALAPPDATA%\\Pigion\\DEVICE_NAME\\.venv` by default, installs dependencies inside that venv, writes `.env`, writes `watchdog.ps1` and `uninstall.ps1`, registers a user scheduled task named `Pigion_DEVICE_NAME`, and starts it immediately. Override the Windows install root with `PIGION_INSTALL_ROOT` before running the installer.
 
 The target `.env` is populated automatically from registration:
 
@@ -261,7 +269,7 @@ SUDO_PASSWORD="..."
 TEST_SUDO_PASSWORD="..."
 ```
 
-For `LLM_PROVIDER=gemini`, use a Gemini model such as `gemini-2.5-flash-lite` and provide a model API key. For `LLM_PROVIDER=openai`, use an OpenAI chat model such as `gpt-4.1-mini` and provide a model API key. For `LLM_PROVIDER=ollama`, set `LLM_MODEL` to a local model name and `OLLAMA_HOST` to the reachable Ollama URL, for example `http://192.168.1.50:11434`; no model API key is required.
+For `LLM_PROVIDER=gemini`, use a Gemini model such as `gemini-2.5-flash-lite` and provide a model API key. For `LLM_PROVIDER=openai`, use an OpenAI chat model such as `gpt-4.1-mini` and provide a model API key. For `LLM_PROVIDER=ollama`, set `LLM_MODEL` to a local model name and `OLLAMA_HOST` to the reachable Ollama URL, for example `http://192.168.1.50:11434`; no model API key is required. GPT Researcher framework registrations add their own framework fields for Ollama base URL, embedding model, SearXNG URL, extraction mode, and optional Qdrant URL. On Windows, those URLs can point to remote services; the Pigion webserver writes the config but does not serve LLM or embedding requests.
 
 The sudo password is also used by the installer for its privileged setup steps. Because model credentials, sudo credentials, and generated install settings are embedded in the generated installer endpoint and stored in local JSON for now, treat `server/devices.json` and `/install/<uuid>.sh` as sensitive.
 
@@ -275,7 +283,7 @@ The generated device-side `client.py`:
 
 ### Device Removal
 
-The dashboard has a `Remove Registered Device` action. Removing a device queues a special uninstall job for that device. The installed client handles that job by launching `/opt/pigion/DEVICE_NAME/uninstall.sh`, which reads sudo credentials from `/opt/pigion/DEVICE_NAME/.env` and removes the device service plus install directory on the target. After the device acknowledges the uninstall job, the server deletes its registry row, queued jobs, generated orchestrator tool, generated installer, and generated local package. If the device is down or does not acknowledge in time, it remains registered with the uninstall job pending so it can receive the command when it comes back online.
+The dashboard has a `Remove Registered Device` action. Removing a device queues a special uninstall job for that device. The installed client handles that job by launching the platform uninstall script: `/opt/pigion/DEVICE_NAME/uninstall.sh` on Linux, or `uninstall.ps1` in the Windows install directory. After the device acknowledges the uninstall job, the server deletes its registry row, queued jobs, generated orchestrator tool, generated installer, and generated local package. If the device is down or does not acknowledge in time, it remains registered with the uninstall job pending so it can receive the command when it comes back online.
 
 ### Device Client API
 

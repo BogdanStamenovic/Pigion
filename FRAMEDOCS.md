@@ -39,6 +39,7 @@ platforms/pigion/linux
 platforms/pigion/windows
 platforms/langchain/linux
 platforms/autogen/linux
+platforms/gpt_researcher/windows
 ```
 
 ## Core Runner Contract
@@ -187,7 +188,7 @@ Before adding a new framework wrapper, make sure:
 
 ## GPT Researcher Wrapper
 
-The `gpt_researcher/linux` wrapper is a research framework option. Its intended stack is:
+The `gpt_researcher/linux` and `gpt_researcher/windows` wrappers are research framework options. Their intended stack is:
 
 - LLM: the model chosen at registration.
 - Inference: Ollama.
@@ -204,3 +205,5 @@ PIGION_GPT_RESEARCHER_DRY_RUN=1
 PIGION_GPT_RESEARCHER_SKIP_DEP_INSTALL=1
 PIGION_GPT_RESEARCHER_SKIP_OLLAMA_PULL=1
 ```
+
+For Windows registrations, the server generates a PowerShell installer at `/install/<uuid>.ps1` plus a zip bundle. The installer creates a venv under `%LOCALAPPDATA%\\Pigion\\DEVICE_NAME` by default, writes `.env`, creates `watchdog.ps1` and `uninstall.ps1`, registers a user scheduled task, and starts it immediately. The generated client launches `uninstall.ps1` for remote removal jobs. Windows GPT Researcher devices can use a remote Ollama/SearXNG/Qdrant server through the registration URLs; the Pigion webserver only writes configuration and does not serve embeddings or LLM inference.

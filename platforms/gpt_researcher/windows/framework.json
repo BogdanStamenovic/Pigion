@@ -1,0 +1,60 @@
+{
+  "display_name": "GPT Researcher",
+  "description": "Windows research watchdog wrapper using GPT Researcher with configurable Ollama inference, nomic embeddings, SearXNG search, Playwright browsing, Trafilatura or Crawl4AI extraction, and optional Qdrant memory.",
+  "questions": [
+    {
+      "name": "GPT_RESEARCHER_LLM_MODEL",
+      "label": "Ollama LLM model",
+      "default": "llama3.1",
+      "required": true,
+      "help": "Model tag to use through the configured Ollama server. The wrapper maps it to FAST_LLM, SMART_LLM, and STRATEGIC_LLM."
+    },
+    {
+      "name": "GPT_RESEARCHER_OLLAMA_BASE_URL",
+      "label": "Ollama base URL",
+      "default": "http://127.0.0.1:11434",
+      "required": true,
+      "help": "May point to this Windows device or to another machine on LAN/Tailscale."
+    },
+    {
+      "name": "GPT_RESEARCHER_EMBEDDING_MODEL",
+      "label": "Embedding model",
+      "default": "nomic-embed-text",
+      "required": true
+    },
+    {
+      "name": "GPT_RESEARCHER_SEARXNG_URL",
+      "label": "SearXNG URL",
+      "default": "http://127.0.0.1:8080",
+      "required": true
+    },
+    {
+      "name": "GPT_RESEARCHER_BROWSER",
+      "label": "Browser",
+      "default": "playwright",
+      "options": ["playwright"],
+      "required": true
+    },
+    {
+      "name": "GPT_RESEARCHER_EXTRACTION",
+      "label": "Extraction engine",
+      "default": "trafilatura",
+      "options": ["trafilatura", "crawl4ai"],
+      "required": true
+    },
+    {
+      "name": "GPT_RESEARCHER_QDRANT_URL",
+      "label": "Qdrant URL",
+      "default": "",
+      "required": false,
+      "help": "Optional. Set when a long-running research worker should remember sources in Qdrant."
+    },
+    {
+      "name": "GPT_RESEARCHER_REPORT_TYPE",
+      "label": "Default report type",
+      "default": "research_report",
+      "options": ["research_report", "resource_report", "outline_report", "custom_report"],
+      "required": true
+    }
+  ]
+}
