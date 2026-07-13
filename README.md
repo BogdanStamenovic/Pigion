@@ -1,502 +1,359 @@
 # Pigion
 
-Pigion is an experimental local autonomous-agent framework. The active runner in this workspace is `pi/run_pi.py`, a Linux/Pi-oriented loop that uses Gemini for goal formalization, planning, action selection, action evaluation, interactive-session evaluation, and failure recovery. Tool calls are executed through Python modules in `pi/tools`.
+> **Feedback loops feed poops.**
 
-The current runner is intentionally bounded: it creates a plan, works one plan step at a time, executes one tool action at a time, evaluates progress, attempts recovery on failures, and stops when the plan is complete or a configured limit is reached.
+Pigion is an always-running autonomous control platform for the arbitrary devices around you. A watchdog can live on a desktop, a 3D printer, a drone, a robot, a programming workstation, or something nobody has written an integration for yet. It can be specialized for one machine or generalized with Pigion's own agent loop.
 
-## Current Layout
+Each watchdog is a complete standalone agent. It owns its local reasoning, tools, feedback, and execution; it does not need to know that it belongs to a larger system. The orchestrator is a manager, not a central brain. Today it routes goals between people and watchdogs. The intended system will also pass useful observations between otherwise independent agents.
+
+Pigion is built for private homes, labs, disposable systems, and hardware you can recover. It is a platform I use daily, but it is also a learning project with sharp and occasionally absurd edges. It is not polished industrial automation.
+
+## Why It Is Called Pigion
+
+The project started as **Crow**, because crows are smart, observant, and social. Then I used the rough prototype and discovered that it was kind of dumb, so Crow became Pigeon.
+
+The final name came from a watchdog running on a very weak model. Its master prompt said, "You are root." It was given a negative-search task: find an anomaly, even though there was no anomaly to find. After examining the filesystem it concluded:
+
+> There is a `/root` folder which does not contain my source files. This is an anomaly because I am root. Starting removal: `rm -rf /root`.
+
+So Pigeon lost the **e** for "exceptional" and gained an **I** for **"I am root."** It became **Pigion**.
+
+That failure is the point of the motto. Weak agents fail. They misunderstand instructions, invent anomalies, and take bad actions. A feedback loop gives those failures somewhere to go: observe the result, evaluate it, recover, remember what happened, and try again. Enough feedback can make a cheap model with tools appear surprisingly competent. It can also make a new and more elaborate mistake.
+
+## Read This Before Running It
+
+Pigion does not try to be safe.
+
+It can run model-selected shell commands, use sudo credentials, modify or delete files, leak `.env` values, corrupt device state, or take unsafe physical actions through connected hardware. Installing a watchdog means giving an autonomous agent operational control of that device. The dashboard and uninstall flow do not turn that agent into a sandbox.
+
+Use Pigion only on machines and devices you can lose, restore, re-image, or physically contain. Keep backups. Do not expose the controller or installer endpoints to untrusted networks. Do not give a watchdog access to anything you are unwilling to have destroyed or disclosed.
+
+## The Intended Whole-Home System
+
+Imagine one cheap manager and several independent watchdogs:
+
+- A desktop watchdog notices failing storage, performs programming work, or turns the machine on and off.
+- A 3D-printer watchdog observes temperatures, failed prints, maintenance needs, and job state.
+- A drone or robot watchdog owns motion, sensors, local decisions, and recovery on its device.
+- Other watchdogs can control cameras, appliances, lab hardware, or software services.
+
+The orchestrator tells watchdogs what is currently worth looking out for. A watchdog reports anything mildly interesting or concerning, along with goal results and failures. The orchestrator decides what matters and selectively injects that context into other watchdogs that may benefit from it.
+
+The watchdogs remain independent. The orchestrator should not absorb their complete internal state or become responsible for every local decision. It manages attention and information between agents that can already operate alone.
+
+This attention/context bus is the next major direction. It is not implemented yet.
+
+## What Works Today
+
+The current repository is a working daily-use prototype with:
+
+- A FastAPI dashboard and JSON-backed device/job registry.
+- A local orchestrator worker that accepts goals from the webserver.
+- Independent Linux and Windows watchdog installation.
+- Pluggable framework/runtime manifests with validated configuration questions.
+- Required, default, and optional tool policies with per-device selection.
+- Framework-owned install, verification, upgrade, and uninstall lifecycle scripts.
+- Device heartbeats, queued goals, progress, results, logs, and down-state reporting.
+- Remote removal that asks the installed watchdog to uninstall itself before deleting its registry state.
+- Pigion's general planning/tool/recovery loop and a GPT Researcher wrapper.
+
+What does **not** exist yet:
+
+- A shared watchdog observation or context bus.
+- Orchestrator-directed "look out for this" subscriptions.
+- General proactive/event-driven missions across frameworks.
+- Mature printer, drone, robot, or home-device integrations.
+- Industrial reliability, isolation, credential protection, or safety guarantees.
+
+## Architecture
+
+```text
+                         goals and future attention guidance
+                                      |
+                                      v
++------------------+        +-----------------------+
+| Web dashboard    |<------>| Orchestrator manager  |
+| registry + jobs  |        | routing + coordination|
++--------+---------+        +-----------+-----------+
+         |                              |
+         | heartbeat / poll / result    | device goals
+         v                              v
++------------------+  +------------------+  +------------------+
+| Desktop watchdog |  | Printer watchdog |  | Robot watchdog   |
+| standalone agent |  | standalone agent |  | standalone agent |
++------------------+  +------------------+  +------------------+
+```
+
+The generated `client.py` is deliberately framework-neutral. It heartbeats, polls for a job, calls the selected runner's `run_agent(goal)` (or compatible device function), and posts the result. The selected framework owns local reasoning and execution behind that stable communication contract.
+
+The repository currently contains:
 
 ```text
 Pigion/
   README.md
+  ROADMAP.md
   TOOLDOCS.md
-  requirements.txt
+  FRAMEDOCS.md
+  maker.py
+  install.sh
   setup.sh
   setup.ps1
-  maker.py
-  file_sort_test copy.py
-  test.py
-  agent_test_makers/
+  uninstall.sh
+  requirements.txt
   server/
     server.py
     device_client.py
+    orchestrator_client.py
     web_store.py
     devices.json
     jobs.json
-    config.json
-    sessions.json
-    installers/
   orchestrator/
     run_orchestrator.py
-    exp/
-      td.txt
-      enving.txt
-      exp.jsonl
-    tools/
-  laptop/
-    run_laptop.py
     exp/
     tools/
   pi/
     run_pi.py
     exp/
-      td.txt
-      enving.txt
-      exp.jsonl
     tools/
-      askuser.py
-      memadd.py
-      return_value.py
-      search.py
-      shell.py
-  pi_exp/
-    exp.jsonl
+  laptop/
+    run_laptop.py
   platforms/
-    core/
-      whatchdog.py
-    linux/
-    windows/
+    pigion/
+      core/whatchdog.py
+      linux/
+        framework.json
+        tools/
+      windows/
+        framework.json
+        tools/
+    gpt_researcher/
+      core/whatchdog.py
+      linux/
+        framework.json
+        lifecycle/
+        tools/
+      windows/
+        framework.json
+        lifecycle/
+        tools/
+  tests/
 ```
 
-`pi/` is the active local runtime and tool package. `server/` contains the lightweight FastAPI dashboard, JSON storage, device polling API, and installers. `orchestrator/` is the orchestrator agent package; generated device tool modules are written to `orchestrator/tools/` because `orchestrator/run_orchestrator.py` imports tools from `orchestrator/exp/td.txt`.
+The Pi, laptop, orchestrator, and generated framework runners intentionally remain separate implementations. Consolidating them into one polished runtime is not a current priority.
 
-## Requirements
+## Quick Start
 
-Runtime dependencies are in `requirements.txt`:
-
-- `google-genai` for Gemini calls.
-- `python-dotenv` for `.env` loading.
-- `ddgs` for search and URL extraction.
-- `protobuf`, used by the Google client stack.
-- `fastapi` for the orchestrator dashboard and device API.
-- `uvicorn` for serving the orchestrator dashboard.
-
-Python 3 is required.
-
-## Setup
-
-Linux/Pi:
+Python 3 is required. The controller currently targets Linux/systemd for its repo-local services.
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+git clone <your-pigion-repository-url>
+cd Pigion
+./install.sh
 ```
 
-Windows PowerShell:
+`install.sh` delegates to `setup.sh`. The setup creates `.venv`, installs `requirements.txt`, prepares configuration/state, and installs the web and orchestrator services where supported.
 
-```powershell
-.\setup.ps1
-```
-
-The setup scripts can create `.venv`, install requirements, write `.env`, and install the webserver/orchestrator systemd services.
-
-At minimum, `.env` needs:
+The important controller settings are:
 
 ```env
 ABS_PATH="/absolute/path/to/Pigion"
 LLM_PROVIDER="gemini"
 LLM_MODEL="gemini-2.5-flash-lite"
 LLM_API_KEY="your-model-api-key"
-```
-
-Optional runtime settings:
-
-```env
-SUDO_PASSWORD=""
-TEST_SUDO_PASSWORD=""
-GEMINI_API_KEY="your-google-genai-key"
-OPENAI_API_KEY="your-openai-key"
-OPENAI_BASE_URL="https://api.openai.com/v1"
-OLLAMA_HOST="http://127.0.0.1:11434"
-API_KEY="legacy-google-genai-key"
-GEMINI_MODEL="gemini-2.5-flash-lite"
-LLM_TEMPERATURE="0.3"
 PIGION_ORCHESTRATOR_USER="admin"
-PIGION_ORCHESTRATOR_PASSWORD="pigion"
+PIGION_ORCHESTRATOR_PASSWORD="change-this"
 PIGION_SERVER_URL="http://127.0.0.1:8000"
-PIGION_HEARTBEAT_TIMEOUT="60"
 ```
 
-## Running
+The built-in Pigion runtime supports `gemini`, `openai`, and `ollama`. Provider-specific variables include `GEMINI_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OLLAMA_HOST`. Frameworks that do not use Pigion's model layer define their own questions in `framework.json` instead.
 
-The Pi runner still has a hard-coded demo goal at the bottom of `pi/run_pi.py`:
-
-```bash
-python3 pi/run_pi.py
-```
-
-To run your own goal from Python:
-
-```python
-from pi.run_pi import run_agent
-
-run_agent("Inspect the current directory and summarize the files.")
-```
-
-## Orchestrator Dashboard
-
-`server/server.py` is a small FastAPI app for registering watchdog devices, queueing work, and showing device/job status. It intentionally uses JSON files only:
-
-| File | Purpose |
-| --- | --- |
-| `server/devices.json` | Registered devices, UUIDs, generated command names, installer paths, and heartbeat state. |
-| `server/jobs.json` | Queued, running, finished, and failed goals. |
-| `server/config.json` | Login defaults, heartbeat timeout, session TTL, and public server URL. |
-| `server/sessions.json` | Login session cookies. |
-
-Start it manually with:
-
-```bash
-python -m uvicorn server.server:app --host 127.0.0.1 --port 8000
-```
-
-Or install the repo-local services:
-
-```bash
-./install.sh
-```
-
-The installer creates and enables:
-
-- `pigion-web.service`, which runs the FastAPI webserver.
-- `pigion-orchestrator.service`, which polls the webserver for goals targeting the local orchestrator and runs `orchestrator.run_orchestrator` for each queued goal.
-
-The service binds to `0.0.0.0` so it is reachable through normal LAN interfaces and Tailscale. When Tailscale is installed, the installer prefers the machine's Tailscale IPv4 address for `PIGION_SERVER_URL`, so generated device installers point at the Tailscale address. Override this with:
+The installer normally binds the webserver to `0.0.0.0`. When Tailscale is available, setup prefers its IPv4 address for generated device installers. Override the advertised address with:
 
 ```bash
 PIGION_PUBLIC_HOST=100.x.y.z ./install.sh
 ```
 
-Uninstall the repo-local services with:
+Open:
+
+```text
+http://<controller-address>:8000/login
+```
+
+The repository defaults are `admin` / `pigion`; change them before treating the controller as anything other than a local experiment.
+
+To remove the repo-local web and orchestrator services without deleting repository data:
 
 ```bash
 ./uninstall.sh
 ```
 
-That stops/disables `pigion-web.service` and `pigion-orchestrator.service`, removes their unit files and enablement symlinks, reloads systemd, and leaves repo data such as `.env`, `.venv`, and JSON state intact.
+Windows `setup.ps1` can prepare a local Python environment, while registered Windows watchdogs use generated PowerShell installers and Scheduled Tasks.
 
-Then open:
+## Registering a Watchdog
 
-```text
-http://<tailscale-ip-or-hostname>:8000/login
-```
+The dashboard registration workflow is:
 
-The default login is `admin` / `pigion`. For real use, set `PIGION_ORCHESTRATOR_USER` and `PIGION_ORCHESTRATOR_PASSWORD` before the first run, or edit `server/config.json`.
+1. Choose a watchdog name and framework/runtime.
+2. The webapp loads that runtime's validated `framework.json` specification.
+3. Configure the device OS/terminal and answer framework-owned questions.
+4. Choose tools according to the manifest:
+   - `required`: always selected and locked.
+   - `default`: initially selected but removable.
+   - `optional`: available but initially disabled.
+5. For the Pigion framework, configure Gemini, OpenAI, or Ollama. Other frameworks can own their model configuration.
+6. Provide the target sudo password when Linux installation needs it.
+7. Register the device and run the generated Linux or Windows installer command on the target.
 
-The dashboard currently includes:
+Registration does not update the Git checkout. It uses the framework definitions from the controller's currently deployed revision, creates only the selected tool package, records the manifest revision, and generates a device-specific installer.
 
-- Device list with heartbeat status.
-- `(DEVICE IS DOWN)` display when the last heartbeat is older than `heartbeat_timeout_seconds`.
-- Queue counts for running and waiting jobs.
-- Recent goals.
-- Recent logs.
-- Register Device page.
-- Remove Registered Device page.
-- Send Goal page. Choose `Local Orchestrator` to route the goal through the orchestrator, or choose a registered device to queue directly to that device.
+Linux devices are installed under `/opt/pigion/DEVICE_NAME` by default and run as a systemd service. Windows devices are installed under `%LOCALAPPDATA%\Pigion\DEVICE_NAME` by default and run through a user Scheduled Task. `PIGION_INSTALL_ROOT` overrides either location.
 
-### Device Registration
+Framework lifecycle scripts run during installation before the watchdog starts. These are trusted arbitrary repository scripts, not sandboxed plugins. A framework can therefore be as destructive as the watchdog it installs.
 
-The Register Device page does the first-pass provisioning work:
+The detailed wrapper, manifest, tool-policy, and lifecycle contract is in [FRAMEDOCS.md](FRAMEDOCS.md).
 
-1. Runs `git pull` in the project root.
-2. Asks the same core questions as `maker.py`: watchdog name, framework/runtime template, OS, and terminal.
-3. Discovers tools automatically from the selected framework/runtime `exp/td.txt` and tool files.
-4. Prompts for model provider, model name, model API key, Ollama host, and OpenAI base URL.
-5. Prompts for the target device sudo password.
-6. Optionally prompts for the browser-facing `td.txt` capability block used by the orchestrator; if left blank, the server builds one from the discovered tool docs.
-7. Calls `maker.create_instance()` with the selected framework/runtime, discovered tools, and entered environment text.
-8. Generates a UUID for the device.
-9. Stores the device in `server/devices.json`.
-10. Generates install endpoints under `/install/<uuid>...`.
-11. Adds a device command to `orchestrator/exp/td.txt`.
-12. Generates the matching `orchestrator/tools/device_DEVICE_NAME.py` module. The agent sees the device name in the command; the generated tool keeps the UUID internally.
+## Sending and Coordinating Goals
 
-The generated orchestrator tool queues a goal for that device. The command name uses the registered device name, not the UUID. For example, after registering a device named `Bogdan`, the orchestrator may advertise:
+The Send Goal page currently supports:
+
+- **Local Orchestrator**: queue a high-level goal for `server/orchestrator_client.py`, which starts a fresh orchestrator process.
+- **Registered watchdog**: queue a goal directly for one device UUID.
+
+Registering a watchdog also creates an orchestrator tool such as:
 
 ```text
-device_Bogdan:Check system temperature
+device_workshop_printer:Inspect the last failed print and report the likely cause
 ```
 
-Because `orchestrator/run_orchestrator.py` imports tools from `orchestrator/exp/td.txt`, the generated tool module is required. The `td.txt` entry also preserves the current brittle parser shape: the third comma-separated field must contain `Command - prefix:...`.
+The generated tool hides the UUID and lets the orchestrator address the watchdog by its registered name. This is current goal routing, not yet the planned observation/context system.
 
-### Orchestrator Goals
+## Device Communication
 
-The webserver reserves the internal job target `__orchestrator__` for local orchestrator work. The browser `Send Goal` page exposes this as `Local Orchestrator`; posted goals are picked up by `server/orchestrator_client.py`. The worker starts a fresh orchestrator process for each goal so new device registrations are visible without restarting the worker.
-
-Goals can also be queued through JSON:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/orchestrator/goals \
-  -H 'Content-Type: application/json' \
-  -d '{"goal":"Check which registered device should handle this."}'
-```
-
-The final registration page prints an installer command. Linux/runtime registrations use:
-
-```bash
-curl -fsSL http://127.0.0.1:8000/install/<device_uuid>.sh | bash
-```
-
-Windows/runtime registrations use PowerShell:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (iwr -UseBasicParsing 'http://127.0.0.1:8000/install/<device_uuid>.ps1').Content"
-```
-
-Set `PIGION_SERVER_URL` to the reachable host name before registering devices if the device should install from another machine, for example:
-
-```env
-PIGION_SERVER_URL="http://100.x.y.z:8000"
-```
-
-The generated Linux `install.sh` downloads a bundle of the generated watchdog package, downloads a per-device `client.py`, creates a virtual environment at `/opt/pigion/DEVICE_NAME/.venv`, installs dependencies inside that venv, writes `/opt/pigion/DEVICE_NAME/.env`, writes `/opt/pigion/DEVICE_NAME/uninstall.sh`, writes `/etc/systemd/system/pigion_DEVICE_NAME.service`, enables the service, and starts it. The service runs as the installing user, starts from that user's home directory, and keeps the code/config under `/opt/pigion/DEVICE_NAME` by default. Override that install location with `PIGION_INSTALL_ROOT` when running the installer.
-
-The generated Windows `install.ps1` downloads a zip bundle and per-device `client.py`, creates a virtual environment at `%LOCALAPPDATA%\\Pigion\\DEVICE_NAME\\.venv` by default, installs dependencies inside that venv, writes `.env`, writes `watchdog.ps1` and `uninstall.ps1`, registers a user scheduled task named `Pigion_DEVICE_NAME`, and starts it immediately. Override the Windows install root with `PIGION_INSTALL_ROOT` before running the installer.
-
-The target `.env` is populated automatically from registration:
-
-```env
-ABS_PATH="/opt/pigion/DEVICE_NAME"
-API_KEY="..."
-LLM_PROVIDER="gemini"
-LLM_MODEL="gemini-2.5-flash-lite"
-LLM_API_KEY="..."
-GEMINI_API_KEY="..."
-OPENAI_API_KEY="..."
-OPENAI_BASE_URL="https://api.openai.com/v1"
-OLLAMA_HOST="http://127.0.0.1:11434"
-SUDO_PASSWORD="..."
-TEST_SUDO_PASSWORD="..."
-```
-
-For `LLM_PROVIDER=gemini`, use a Gemini model such as `gemini-2.5-flash-lite` and provide a model API key. For `LLM_PROVIDER=openai`, use an OpenAI chat model such as `gpt-4.1-mini` and provide a model API key. For `LLM_PROVIDER=ollama`, set `LLM_MODEL` to a local model name and `OLLAMA_HOST` to the reachable Ollama URL, for example `http://192.168.1.50:11434`; no model API key is required. GPT Researcher framework registrations add their own framework fields for Ollama base URL, embedding model, SearXNG URL, extraction mode, and optional Qdrant URL. On Windows, those URLs can point to remote services; the Pigion webserver writes the config but does not serve LLM or embedding requests.
-
-The sudo password is also used by the installer for its privileged setup steps. Because model credentials, sudo credentials, and generated install settings are embedded in the generated installer endpoint and stored in local JSON for now, treat `server/devices.json` and `/install/<uuid>.sh` as sensitive.
-
-The generated device-side `client.py`:
-
-1. Sends heartbeat updates.
-2. Polls for waiting jobs.
-3. Sends the goal to that device's generated watchdog runner.
-4. Marks the job started/running/finished or failed.
-5. Sends result/error data and logs back to the server.
-
-### Device Removal
-
-The dashboard has a `Remove Registered Device` action. Removing a device queues a special uninstall job for that device. The installed client handles that job by launching the platform uninstall script: `/opt/pigion/DEVICE_NAME/uninstall.sh` on Linux, or `uninstall.ps1` in the Windows install directory. After the device acknowledges the uninstall job, the server deletes its registry row, queued jobs, generated orchestrator tool, generated installer, and generated local package. If the device is down or does not acknowledge in time, it remains registered with the uninstall job pending so it can receive the command when it comes back online.
-
-### Device Client API
-
-Watchdog devices poll the server instead of using WebSockets. The current API is:
+Watchdogs use HTTP polling rather than WebSockets:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/jobs/<device_uuid>` | Return the next waiting job for a device, or `{"job": null}`. |
-| `POST` | `/api/jobs/<job_id>/started` | Mark a job as running. |
-| `POST` | `/api/jobs/<job_id>/progress` | Update progress text and optionally append a log line. |
-| `POST` | `/api/jobs/<job_id>/finished` | Mark a job finished or failed with result/error data. |
-| `POST` | `/api/device/<uuid>/heartbeat` | Refresh the device heartbeat and mark it online. |
-| `POST` | `/api/device/<uuid>/logs` | Append device/job logs. |
+| `GET` | `/api/jobs/<device_uuid>` | Fetch the next waiting device job. |
+| `POST` | `/api/jobs/<job_id>/started` | Mark a job running. |
+| `POST` | `/api/jobs/<job_id>/progress` | Update progress and append logs. |
+| `POST` | `/api/jobs/<job_id>/finished` | Store a result or failure. |
+| `POST` | `/api/device/<uuid>/heartbeat` | Refresh watchdog availability. |
+| `POST` | `/api/device/<uuid>/logs` | Append watchdog/job logs. |
+| `POST` | `/api/orchestrator/goals` | Queue a goal for the local orchestrator. |
+| `GET` | `/api/frameworks/<framework>/<runtime>` | Return an authenticated registration specification. |
 
-There is also a generic polling client at `server/device_client.py` for local testing:
+The stable client contract is intentionally small so different agent frameworks can sit behind it without changing heartbeat, job, result, or removal behavior.
 
-```bash
-python server/device_client.py \
-  --server http://127.0.0.1:8000 \
-  --uuid <device_uuid> \
-  --runner <package>.run_<package>
+## Removing a Watchdog
+
+Removing a registered watchdog queues a special uninstall job. The watchdog launches its framework uninstall lifecycle, then its shared Linux or Windows cleanup script. The server removes registry state, queued work, generated packages, installer artifacts, and the orchestrator tool only after the device acknowledges the uninstall.
+
+If the device is offline, it remains registered with uninstall pending so it can receive that job later.
+
+## Pigion's Built-In General Watchdog
+
+`pi/run_pi.py` is the local development version of the generalized Pigion loop. It:
+
+1. Formalizes a goal when enabled.
+2. Builds a short plan.
+3. Chooses and executes one tool action at a time.
+4. Evaluates progress after every action.
+5. Handles interactive shell sessions.
+6. Searches prior failure/recovery examples.
+7. Retries, replaces steps, or continues until completion or a configured limit.
+
+Its tools include shell execution, search/URL extraction, temporary memory, permanent memory in supported platform packages, direct user questions, and final return handling. Tool imports still depend on the brittle `Command - prefix:` documentation format.
+
+The local runner currently has a hard-coded development goal at the bottom of the file. It can also be called directly:
+
+```python
+from pi.run_pi import run_agent
+
+run_agent("Inspect this machine and report anything interesting.")
 ```
 
-The generated installer command shown after registration runs this client with the device UUID and generated runner module. The client loop is intentionally simple:
+See [TOOLDOCS.md](TOOLDOCS.md) for the current tool contract and runtime details.
 
-1. Send heartbeat.
-2. Poll for a waiting job.
-3. If a job exists, mark it started.
-4. Run the generated watchdog runner against the goal.
-5. Report success, failure, current status, and logs.
+## Adding Frameworks and Devices
 
-### Orchestrator Scope
+Experimental contributions are welcome. A framework/runtime supplies:
 
-This first implementation deliberately does not include WebSockets, Docker, PostgreSQL, user accounts, HTTPS, OAuth, multiple orchestrators, multi-device jobs, async distributed execution, plugin systems, or auto-discovery.
+- A versioned `framework.json` manifest.
+- A standalone runner exposing `run_agent(goal)` or its compatible device entrypoint.
+- Required/default/optional tool modules and documentation.
+- Framework-specific registration questions.
+- Optional install, verify, upgrade, and uninstall lifecycle scripts.
+- Honest documentation of capabilities, assumptions, privileges, and failure modes.
 
-## Runner Flow
+Lifecycle scripts and tool modules are trusted code with arbitrary execution. Manifest validation prevents path traversal and malformed definitions; it does not determine whether a repository script is malicious or sensible.
 
-`pi/run_pi.py` currently follows this flow:
+Read [FRAMEDOCS.md](FRAMEDOCS.md) before adding a wrapper. Read [ROADMAP.md](ROADMAP.md) before designing shared event or coordination abstractions: event patterns should first be proven inside real framework/device integrations.
 
-1. Load `.env`, `pi/exp/td.txt`, and `pi/exp/enving.txt`.
-2. Dynamically import tools described in `pi/exp/td.txt`.
-3. Optionally formalize the user goal.
-4. Create a 3 to 7 step high-level plan.
-5. Work through the plan one step at a time.
-6. Ask the model for exactly one next action.
-7. Dispatch the action to a tool through `run_tool()`.
-8. Evaluate the action for the current step.
-9. If a tool enters interactive mode, run `start_interactive_mode()` and then evaluate all plan steps with `evaluate_action_interactive()`.
-10. On failure, classify the error, search similar past failures in `pi/exp/exp.jsonl`, and ask for a recovery decision.
-11. Continue until all steps are done or a configured limit is reached.
+## Roadmap
 
-Most model calls share `build_system_prompt()` plus role-specific task prompts. Interactive evaluation uses a narrower evaluator system prompt that checks the status of every plan step.
+The roadmap has no dates and makes no polished-product commitments. Each phase separates current capability, the next concrete milestone, and longer-term experimentation. The same roadmap is maintained in [ROADMAP.md](ROADMAP.md).
 
-## Important Runtime State
+### 1. Orchestrator Attention and Context
 
-`agent_state` is model-visible runtime state. It includes values such as:
+**Current:** The orchestrator can route queued goals to named watchdogs and receive their results. It does not collect unsolicited observations or redistribute context.
 
-- `memory`
-- `MEMORYVALS`
-- `last_action`
-- `last_tool_output`
-- `pending_failure`
-- `last_similar_failures`
-- `CURRENT_WORKING_DIRECTORY`
+**Next milestone:** Build the first shared attention/context path without moving device reasoning into the orchestrator.
 
-`program_state` is internal loop/tool metadata. It is passed to tools but is not included in the normal state block shown to the agent. Current uses include:
+- Let the orchestrator publish what watchdogs should look out for.
+- Let watchdogs report interesting observations, concerns, goal results, and failures.
+- Add orchestrator-side filtering, relevance decisions, targeted context injection, provenance, and loop prevention.
+- Preserve watchdog independence; do not share complete internal state or turn the orchestrator into the reasoning brain.
 
-- `force_next_action`
-- `exp_cache_loaded`
-- `original_goal`
-- `formalized_goal`
-- `INTERACTIVE_MODE`
-- `INTERACTIVE_COMPLETED`
-- `BRANCH_MODE`
-- `ACTIVE_SESSION`
-- `SESSION_LABEL`
-- `BRANCH_WORKING_DIRECTORY`
-- `plan_status`
+### 2. Mixed Physical and Digital Integrations
 
-The interactive plan status map is intentionally kept in `program_state` so the loop can use it without showing raw bookkeeping back to the agent.
+**Current:** Pigion has generalized computer watchdogs and a GPT Researcher wrapper, but not the representative physical-device set.
 
-## Tool Actions
+**Next milestone:** Coordinate three substantially different real devices and use their failures to shape later abstractions.
 
-The model chooses actions as strings:
+- Prove coordination using a desktop/programming watchdog, a 3D-printer watchdog, and a mobile, drone, or robot watchdog.
+- Define each integration through its own framework manifest, tools, lifecycle, observations, and operating assumptions.
+- Use these real integrations to discover coordination and event patterns rather than designing them entirely in advance.
 
-| Action | Meaning |
-| --- | --- |
-| `shell:COMMAND` | Run a shell command through `pi/tools/shell.py`. |
-| `search:QUERY_OR_URL` | Search the web or extract text from a URL. |
-| `memadd:TEXT` | Append temporary memory. |
-| `memadd:KEY=VALUE` | Store a runtime key/value in `MEMORYVALS`. |
-| `askuser:QUESTION` | Ask the local user a question. This is handled directly by `run_tool()` with `input()`. |
-| `return:TEXT` | Append text to final returned output. This is handled directly by `run_tool()`. |
+### 3. Framework-Owned Event Autonomy
 
-There is no source `memget` tool in the current `pi/tools` directory, so stored `MEMORYVALS` are visible only through runtime state unless a future tool or dispatcher feature adds retrieval/substitution.
+**Current:** The communication client polls for externally queued goals. Frameworks may implement private behavior, but Pigion has no documented event-autonomy contract.
 
-Tool documentation lives in `pi/exp/td.txt`. `tool_import()` parses that file and imports the command prefixes it finds in the `Command - prefix:...` field. `return` maps to the module name `return_value` during import, although `return:TEXT` is normally handled directly before dynamic dispatch.
+**Next milestone:** Prove proactive behavior inside several wrappers before extracting anything into the shared platform.
 
-See `TOOLDOCS.md` for the tool contract and how to add new tools.
+- Allow makers and end users to define device-specific schedules, sensors, webhooks, files, processes, and other triggers inside wrappers.
+- Support persistent missions and event-driven work without requiring every action to begin as a queued user goal.
+- Extract a common Pigion event contract only after multiple framework implementations demonstrate reusable behavior.
 
-## Current Pi Tools
+### 4. ShadowFS
 
-### `shell`
+**Current:** Model-selected file changes normally touch the host filesystem directly.
 
-`pi/tools/shell.py` is the main execution tool. It maintains a persistent Bash PTY for regular commands and a separate branch PTY for interactive programs such as `ssh`, `sftp`, shells, REPLs, editors, and terminal programs.
+**Next milestone:** Add an inspectable mutation layer that improves experimentation and feedback without being marketed as a security sandbox.
 
-Highlights:
+- Make staged filesystem mutation a core milestone.
+- Let watchdogs mutate a shadow workspace, inspect consequences, and commit or discard changes.
+- Present ShadowFS as a feedback and experimentation mechanism, not a promise that Pigion becomes safe.
 
-- Starts `/bin/bash --noprofile --norc -i` through `pty.fork()`.
-- Disables prompt and echo noise where possible.
-- Tracks `CURRENT_WORKING_DIRECTORY`.
-- Supports sudo through `SUDO_PASSWORD` or `TEST_SUDO_PASSWORD`.
-- Truncates or filters verbose output for commands such as `apt` and `nmap`.
-- Detects interactive prompts and returns `interactive_mode: True`.
-- Uses branch session labels such as `sftp_interactive` or `@host`.
-- Keeps branch labels stable while interactive input is being sent.
+### 5. Maintenance and Developer Experience
 
-### `search`
+**Current:** The platform works around several known parser, entrypoint, tool-contract, and runtime-state inconsistencies.
 
-`pi/tools/search.py` uses `ddgs` to search text queries or extract page text from URLs. It returns a stringified result object and updates `last_tool_output`.
+**Next milestone:** Repair the issues that obstruct coordination and new integrations while retaining independent runtime implementations.
 
-Search requires network access and can be rate-limited. One successful retry path currently omits `program_state` from its return object.
+- Repair the CLI/function entrypoint, brittle tool-document parser, `askuser` contract, search return shape, and memory retrieval behavior.
+- Keep Pi, laptop, orchestrator, and framework runtimes independent rather than prioritizing a shared-core refactor.
+- Improve diagnostics and extension documentation only where they unblock coordination, integrations, or events.
 
-### `memadd`
+### 6. Longer-Term Experiments
 
-`pi/tools/memadd.py` stores temporary context.
+**Current:** The complete controller already runs on Raspberry Pi Zero 2 W-class hardware and can use local or low-cost model providers.
 
-- Plain text is appended to the in-memory `memory` string.
-- `KEY=VALUE` writes into `local_state["MEMORYVALS"]`.
-- Duplicate last-line memory writes are ignored.
+**Direction:** Keep testing how far cheap hardware, weak models, tools, and repeated feedback can be pushed without pretending that experimentation produces industrial reliability.
 
-Memory is runtime-local unless another caller persists it.
+- Explore cheap-model competence through retries, tools, recovery, observation, and cross-device context.
+- Continue targeting extremely inexpensive infrastructure, including Raspberry Pi Zero-class controllers and local or low-cost inference.
+- Explore broader household autonomy without promising industrial reliability, centralized safety, or production hardening.
 
-### `askuser`
+## Expectations
 
-`askuser:TEXT` is handled directly in `run_tool()` with `input()`. The separate `pi/tools/askuser.py` file is not compatible with the current standard tool contract and should be treated as stale until rewritten.
-
-### `return`
-
-`return:TEXT` is handled directly in `run_tool()`, not normally by `pi/tools/return_value.py`. It appends `TEXT` to the global `returned_output`.
-
-## Experience Store
-
-`ExpStore` stores failure and recovery examples in JSONL. Each entry looks like:
-
-```json
-{
-  "name": "shell_command_failed",
-  "reason": "why it failed",
-  "alternative": "shell:alternative command",
-  "step": "the current plan step",
-  "failed_action": "the action that failed",
-  "successful_action": "the later action that worked",
-  "created_at": 1710000000.0
-}
-```
-
-Similarity is local and simple: fields are tokenized into sparse vectors and compared with cosine similarity. Recovery receives the closest matches.
-
-## Key Configuration
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `ABS_PATH` | required | Project root. The runner appends `pi`. |
-| `LLM_PROVIDER` | `gemini` | Model backend: `gemini`, `openai`, or `ollama`. |
-| `LLM_MODEL` | provider-specific | Model used for runner prompts. Defaults to `gemini-2.5-flash-lite`, `gpt-4.1-mini`, or `llama3.1`. |
-| `LLM_API_KEY` | none | Provider-neutral model API key used by Gemini/OpenAI. |
-| `GEMINI_API_KEY` | none | Gemini API key. Preferred over `LLM_API_KEY` for Gemini when set. |
-| `OPENAI_API_KEY` | none | OpenAI API key. Preferred over `LLM_API_KEY` for OpenAI when set. |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible chat completions base URL. |
-| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL or IP/port for local models. |
-| `API_KEY` | none | Legacy fallback API key, still accepted for Gemini/OpenAI compatibility. |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | Legacy Gemini model fallback when `LLM_MODEL` is unset. |
-| `LLM_TEMPERATURE` | `0.3` | Generation temperature. |
-| `MAX_OUTPUT_TOKENS` | `700` | Max model output tokens per call. |
-| `MAX_ACTIONS_PER_STEP` | `12` | Action rounds per plan step. |
-| `MAX_LLM_RETRIES` | `6` | Model-call retry limit. |
-| `MAX_RECOVERY_ATTEMPTS` | `6` | Recovery retry/replacement limit. |
-| `TOKENS_PER_GOAL` | `100000` | Approximate token budget per goal. |
-| `EXP_DB_PATH` | `<ABS_PATH>/exp/exp.jsonl` | Experience DB path after `ABS_PATH` is expanded to `<project>/pi`. |
-| `SIMILAR_FAILURES_TOP_K` | `5` | Similar failures passed to recovery. |
-| `USE_GOAL_FORMALIZER` | `True` | Whether to rewrite goals before planning. |
-| `MAX_SHELL_OUTPUT` | `200000` | Shell output size before truncation. |
-| `SHELL_TAIL_LINES` | `50` | Fallback tail line count. |
-| `SHELL_TRUNCATE_MIN_LINES` | `20` | Minimum line count before truncation. |
-| `SHELL_INTERACTIVE_IDLE_SECONDS` | `30` | Idle wait for interactive branch reads. |
-| `SHELL_INTERACTIVE_PROMPT_GRACE_SECONDS` | `0.5` | Prompt grace wait. |
-| `SUDO_PASSWORD` | none | Optional sudo password. |
-| `TEST_SUDO_PASSWORD` | none | Alternate sudo password variable. |
-
-## TODO
-
-- Implement ShadowFS in the core Pigion runtime so agent file mutations can be staged, inspected, committed, or discarded instead of always touching the host filesystem directly.
-- Move shared runtime behavior out of `pi/run_pi.py`, `laptop/run_laptop.py`, and `platforms/core/whatchdog.py` into a real core module.
-- Replace the hard-coded demo goal with a small CLI or function-first entrypoint.
-- Rewrite `pi/tools/askuser.py` to match the current tool contract or remove it from dynamic import.
-- Decide whether `MEMORYVALS` should get an explicit retrieval/substitution tool and document that behavior in `pi/exp/td.txt`.
-- Fix the `search` retry success return path so it includes `program_state`.
-- Make `tool_import()` parse `pi/exp/td.txt` with a less brittle format.
-
-## Known Rough Edges
-
-- `pi/run_pi.py` and `laptop/run_laptop.py` are duplicated instead of sharing a core.
-- `platforms/core/whatchdog.py` is a copied runtime snapshot, not a clean reusable core.
-- `ABS_PATH` is required; missing it will break path construction because `pi/run_pi.py` immediately appends `pi`.
-- `tool_import()` error text mentions `tool_import.txt`, but current imports are based on `exp/td.txt`.
-- `tool_import()` assumes the command field is the third comma-separated field in each `td.txt` line.
-- `pi/tools/askuser.py` does not satisfy the current standard tool contract, even though `askuser:` actions work through direct `run_tool()` handling.
-- `pi/tools/search.py` has one retry path that can return without `program_state` on success.
-- The runner prints raw model output and internal state for debugging.
-- The main runner still uses a hard-coded demo goal.
-- The shell tool is powerful and can modify the host system.
-
-## Safety
-
-Pigion can execute shell commands chosen by an LLM. Run it only on a machine, VM, or container where that is acceptable. Keep backups of important files, be careful with sudo, and treat `.env` as sensitive if it contains credentials.
+No maturity or safety guarantee is implied by the existence of installers, a dashboard, or daily personal use. Treat every watchdog and integration as experimental trusted code. If you build something interesting with it, document what it controls, what it can destroy, and what feedback lets it recover.
