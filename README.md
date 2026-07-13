@@ -2,7 +2,7 @@
 
 > **Feedback loops feed poops.**
 
-Pigion is an always-running autonomous control platform for the arbitrary devices around you. A watchdog can live on a desktop, a 3D printer, a drone, a robot, a programming workstation, or something nobody has written an integration for yet. It can be specialized for one machine or generalized with Pigion's own agent loop.
+Pigion is an autonomous control platform for the arbitrary devices around you. A watchdog can be installed on a desktop, a 3D printer, a drone, a robot, a programming workstation, or something nobody has written an integration for yet. It can be specialized for one machine or generalized with Pigion's own agent loop.
 
 Each watchdog is a complete standalone agent. It owns its local reasoning, tools, feedback, and execution; it does not need to know that it belongs to a larger system. The orchestrator is a manager, not a central brain. Today it routes goals between people and watchdogs. The intended system will also pass useful observations between otherwise independent agents.
 
@@ -32,12 +32,12 @@ Use Pigion only on machines and devices you can lose, restore, re-image, or phys
 
 Imagine one cheap manager and several independent watchdogs:
 
-- A desktop watchdog notices failing storage, performs programming work, or turns the machine on and off.
-- A 3D-printer watchdog observes temperatures, failed prints, maintenance needs, and job state.
+- A desktop watchdog can create a tiny disk-check helper that calls it when storage becomes concerning, then investigate or repair the problem.
+- A 3D-printer watchdog can create a helper around printer status or sensors that calls it after a failed print or abnormal temperature.
 - A drone or robot watchdog owns motion, sensors, local decisions, and recovery on its device.
 - Other watchdogs can control cameras, appliances, lab hardware, or software services.
 
-The orchestrator tells watchdogs what is currently worth looking out for. A watchdog reports anything mildly interesting or concerning, along with goal results and failures. The orchestrator decides what matters and selectively injects that context into other watchdogs that may benefit from it.
+The orchestrator tells watchdogs what is currently worth looking out for. A watchdog can create small device-specific helper scripts for those conditions. The helper—not a permanently thinking agent loop—calls the watchdog when a schedule, sensor, webhook, file, process, or other condition fires. The watchdog investigates and reports anything mildly interesting or concerning. The orchestrator decides what matters and selectively injects that context into other watchdogs that may benefit from it.
 
 The watchdogs remain independent. The orchestrator should not absorb their complete internal state or become responsible for every local decision. It manages attention and information between agents that can already operate alone.
 
@@ -61,7 +61,8 @@ What does **not** exist yet:
 
 - A shared watchdog observation or context bus.
 - Orchestrator-directed "look out for this" subscriptions.
-- General proactive/event-driven missions across frameworks.
+- A structured architecture/limitations profile understood by both each watchdog and the orchestrator.
+- A general helper-trigger convention across frameworks.
 - Mature printer, drone, robot, or home-device integrations.
 - Industrial reliability, isolation, credential protection, or safety guarantees.
 
@@ -287,7 +288,7 @@ Experimental contributions are welcome. A framework/runtime supplies:
 
 Lifecycle scripts and tool modules are trusted code with arbitrary execution. Manifest validation prevents path traversal and malformed definitions; it does not determine whether a repository script is malicious or sensible.
 
-Read [FRAMEDOCS.md](FRAMEDOCS.md) before adding a wrapper. Read [ROADMAP.md](ROADMAP.md) before designing shared event or coordination abstractions: event patterns should first be proven inside real framework/device integrations.
+Read [FRAMEDOCS.md](FRAMEDOCS.md) before adding a wrapper. Read [ROADMAP.md](ROADMAP.md) before designing shared trigger or coordination abstractions: helper patterns should first be proven inside real framework/device integrations.
 
 ## Roadmap
 
@@ -304,7 +305,19 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 - Add orchestrator-side filtering, relevance decisions, targeted context injection, provenance, and loop prevention.
 - Preserve watchdog independence; do not share complete internal state or turn the orchestrator into the reasoning brain.
 
-### 2. Mixed Physical and Digital Integrations
+### 2. Architecture and Limitation Awareness
+
+**Current:** Framework manifests describe tools, configuration, lifecycle scripts, and supported operating systems, but neither the watchdog nor orchestrator receives a complete model of what the device can do, cannot do, cannot observe, or is likely to misunderstand.
+
+**Next milestone:** Make limitations part of the agent architecture instead of leaving them as prose or discovering them only after failure.
+
+- Let each framework/device declare capabilities, unavailable actions, observable state, required dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty.
+- Inject the local profile into the watchdog so it understands its own body, tools, blind spots, and architectural limits before planning.
+- Give the orchestrator a concise version of every watchdog profile so it can route goals and context without assuming unsupported capabilities.
+- Let watchdogs and the orchestrator report when a request exceeds known limits instead of silently inventing a capability; this is architectural self-knowledge, not a safety or approval layer.
+- Update profiles from real failures and changed device state while retaining provenance for whether a limit was declared, observed, or inferred.
+
+### 3. Mixed Physical and Digital Integrations
 
 **Current:** Pigion has generalized computer watchdogs and a GPT Researcher wrapper, but not the representative physical-device set.
 
@@ -312,19 +325,19 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 
 - Prove coordination using a desktop/programming watchdog, a 3D-printer watchdog, and a mobile, drone, or robot watchdog.
 - Define each integration through its own framework manifest, tools, lifecycle, observations, and operating assumptions.
-- Use these real integrations to discover coordination and event patterns rather than designing them entirely in advance.
+- Use these real integrations to discover coordination and helper-trigger patterns rather than designing them entirely in advance.
 
-### 3. Framework-Owned Event Autonomy
+### 4. Framework-Owned Trigger Helpers
 
-**Current:** The communication client polls for externally queued goals. Frameworks may implement private behavior, but Pigion has no documented event-autonomy contract.
+**Current:** The communication client polls for externally queued goals. A framework or watchdog can create its own scripts, but Pigion has no documented convention for small helpers that wake or call an agent.
 
-**Next milestone:** Prove proactive behavior inside several wrappers before extracting anything into the shared platform.
+**Next milestone:** Let watchdogs create and manage tiny device-specific helper scripts, then prove that pattern in several wrappers before extracting shared behavior into the platform.
 
-- Allow makers and end users to define device-specific schedules, sensors, webhooks, files, processes, and other triggers inside wrappers.
-- Support persistent missions and event-driven work without requiring every action to begin as a queued user goal.
-- Extract a common Pigion event contract only after multiple framework implementations demonstrate reusable behavior.
+- Let helpers watch device-specific schedules, sensors, webhooks, files, processes, and other conditions, then call the watchdog with a focused goal or context when something happens.
+- Keep helpers small and deterministic; they detect and notify, while the watchdog performs the autonomous reasoning and response.
+- Extract a common helper invocation and management convention only after multiple framework implementations demonstrate reusable behavior.
 
-### 4. ShadowFS
+### 5. ShadowFS
 
 **Current:** Model-selected file changes normally touch the host filesystem directly.
 
@@ -334,7 +347,7 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 - Let watchdogs mutate a shadow workspace, inspect consequences, and commit or discard changes.
 - Present ShadowFS as a feedback and experimentation mechanism, not a promise that Pigion becomes safe.
 
-### 5. Maintenance and Developer Experience
+### 6. Maintenance and Developer Experience
 
 **Current:** The platform works around several known parser, entrypoint, tool-contract, and runtime-state inconsistencies.
 
@@ -342,9 +355,9 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 
 - Repair the CLI/function entrypoint, brittle tool-document parser, `askuser` contract, search return shape, and memory retrieval behavior.
 - Keep Pi, laptop, orchestrator, and framework runtimes independent rather than prioritizing a shared-core refactor.
-- Improve diagnostics and extension documentation only where they unblock coordination, integrations, or events.
+- Improve diagnostics and extension documentation only where they unblock coordination, integrations, or trigger helpers.
 
-### 6. Longer-Term Experiments
+### 7. Longer-Term Experiments
 
 **Current:** The complete controller already runs on Raspberry Pi Zero 2 W-class hardware and can use local or low-cost model providers.
 
