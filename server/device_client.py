@@ -74,7 +74,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Poll a Pigion orchestrator for device jobs.")
     parser.add_argument("--server", required=True)
     parser.add_argument("--uuid", required=True)
-    parser.add_argument("--runner", required=True, help="Python module containing run_agent, for example pi.run_pi")
+    parser.add_argument("--runner", required=True, help="Generated Python module containing run_agent, for example workshop.run_workshop")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     args = parser.parse_args()
     run_client(args.server, args.uuid, args.runner, args.poll_seconds)

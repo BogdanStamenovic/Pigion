@@ -112,12 +112,6 @@ Pigion/
     run_orchestrator.py
     exp/
     tools/
-  pi/
-    run_pi.py
-    exp/
-    tools/
-  laptop/
-    run_laptop.py
   platforms/
     pigion/
       core/whatchdog.py
@@ -140,7 +134,7 @@ Pigion/
   tests/
 ```
 
-The Pi, laptop, orchestrator, and generated framework runners intentionally remain separate implementations. Consolidating them into one polished runtime is not a current priority.
+The orchestrator and framework watchdogs intentionally remain separate implementations. Consolidating every agent loop into one polished runtime is not a current priority.
 
 ## Quick Start
 
@@ -253,7 +247,7 @@ If the device is offline, it remains registered with uninstall pending so it can
 
 ## Pigion's Built-In General Watchdog
 
-`pi/run_pi.py` is the local development version of the generalized Pigion loop. It:
+`platforms/pigion/core/whatchdog.py` is the source of truth for the generalized Pigion loop. `maker.py` copies it into each generated device package and supplies only the tools selected for that watchdog. The runner:
 
 1. Formalizes a goal when enabled.
 2. Builds a short plan.
@@ -265,12 +259,15 @@ If the device is offline, it remains registered with uninstall pending so it can
 
 Its tools include shell execution, search/URL extraction, temporary memory, permanent memory in supported platform packages, direct user questions, and final return handling. Tool imports still depend on the brittle `Command - prefix:` documentation format.
 
-The local runner currently has a hard-coded development goal at the bottom of the file. It can also be called directly:
+Generated packages expose the runner through `run_agent(goal)` and are normally called by the framework-neutral device client. For local wrapper development, generate a disposable instance with `maker.py` rather than maintaining another copied runner:
 
-```python
-from pi.run_pi import run_agent
-
-run_agent("Inspect this machine and report anything interesting.")
+```bash
+python3 -m maker local_watchdog \
+  --framework pigion \
+  --platform linux \
+  --tools shell,search,return \
+  --env-os Linux \
+  --env-terminal bash
 ```
 
 See [TOOLDOCS.md](TOOLDOCS.md) for the current tool contract and runtime details.
@@ -354,7 +351,7 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 **Next milestone:** Repair the issues that obstruct coordination and new integrations while retaining independent runtime implementations.
 
 - Repair the CLI/function entrypoint, brittle tool-document parser, `askuser` contract, search return shape, and memory retrieval behavior.
-- Keep Pi, laptop, orchestrator, and framework runtimes independent rather than prioritizing a shared-core refactor.
+- Keep the orchestrator and framework runtimes independent rather than prioritizing a single universal agent core.
 - Improve diagnostics and extension documentation only where they unblock coordination, integrations, or trigger helpers.
 
 ### 7. Longer-Term Experiments

@@ -71,13 +71,11 @@ The generated `client.py` will call that function with the queued goal text. The
 
 On failure, raise an exception. The client catches it and posts the traceback to the server job record.
 
-The server generator replaces these placeholders in the copied runner:
+The built-in Pigion runner uses these placeholders, which the generator replaces in the copied runner:
 
 ```python
 NAME = "pi"
-NAME = "laptop"
 run_pi
-run_laptop
 ```
 
 If your wrapper does not use those exact strings, make sure it still exposes `run_agent(goal)` so `client.py` can call it without name rewriting.

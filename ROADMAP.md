@@ -62,7 +62,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 **Next milestone:** Repair the issues that obstruct coordination and new integrations while retaining independent runtime implementations.
 
 - Repair the CLI/function entrypoint, brittle tool-document parser, `askuser` contract, search return shape, and memory retrieval behavior.
-- Keep Pi, laptop, orchestrator, and framework runtimes independent rather than prioritizing a shared-core refactor.
+- Keep the orchestrator and framework runtimes independent rather than prioritizing a single universal agent core.
 - Improve diagnostics and extension documentation only where they unblock coordination, integrations, or trigger helpers.
 
 ## 7. Longer-Term Experiments

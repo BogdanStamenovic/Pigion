@@ -48,10 +48,6 @@ if (Test-Path "requirements.txt") {
 
 # Prompt for API key and write to .env
 # Helper functions to write UTF-8 without BOM (Windows PowerShell writes BOM by default)
-function Write-TextUtf8NoBom {
-    param([string]$Path, [string]$Text)
-    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
-}
 function Write-LinesUtf8NoBom {
     param([string]$Path, [string[]]$Lines)
     [System.IO.File]::WriteAllLines($Path, $Lines, (New-Object System.Text.UTF8Encoding($false)))
@@ -98,43 +94,3 @@ Write-Host "Done. .env created/updated."
 if ([string]::IsNullOrWhiteSpace($createVenv) -or $createVenv -match '^[Yy]') {
     Write-Host "To activate the virtualenv: .venv\\Scripts\\Activate.ps1"
 }
-
-# Ask for device type
-$deviceType = Read-Host "Is this device a Pi or a Laptop? [pi/laptop]"
-$deviceType = $deviceType.ToLower()
-
-# Auto-detect OS and TERMINAL for this device
-if ($deviceType -eq "pi" -or $deviceType -eq "laptop") {
-    try {
-        $deviceOs = (Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty Caption)
-    } catch {
-        $deviceOs = $env:OS
-    }
-    if ($deviceOs -and $deviceOs -match 'Windows') {
-        $deviceTerminal = 'powershell'
-    } else {
-        $deviceTerminal = $env:TERM
-        if (-not $deviceTerminal) { $deviceTerminal = $env:COMSPEC }
-        if (-not $deviceTerminal) { $deviceTerminal = $env:SHELL }
-        if (-not $deviceTerminal) { $deviceTerminal = 'bash' }
-    }
-}
-
-# Populate current device's enving.txt automatically
-$currentEnvPath = if ($deviceType -eq "pi") { "pi/exp/enving.txt" } else { "laptop/exp/enving.txt" }
-$currentEnvDir = Split-Path $currentEnvPath -Parent
-if (-not (Test-Path $currentEnvDir)) { New-Item -ItemType Directory -Path $currentEnvDir | Out-Null }
-Write-TextUtf8NoBom $currentEnvPath "OS: $deviceOs`nTERMINAL: $deviceTerminal"
-Write-Host "Populated $currentEnvPath with current device specs."
-
-# Ask for other device's enving.txt fields
-$otherLabel = if ($deviceType -eq "pi") { "laptop" } else { "pi" }
-$otherEnvPath = if ($deviceType -eq "pi") { "laptop/exp/enving.txt" } else { "pi/exp/enving.txt" }
-
-$otherOs = Read-Host "Enter $otherLabel OS (e.g. Windows 10):"
-$otherTerminal = Read-Host "Enter $otherLabel TERMINAL (e.g. powershell):"
-
-$otherEnvDir = Split-Path $otherEnvPath -Parent
-if (-not (Test-Path $otherEnvDir)) { New-Item -ItemType Directory -Path $otherEnvDir | Out-Null }
-Write-TextUtf8NoBom $otherEnvPath "OS: $otherOs`nTERMINAL: $otherTerminal"
-Write-Host "Populated $otherEnvPath with $otherLabel specs."

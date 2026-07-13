@@ -512,7 +512,7 @@ def render_tool_docs(
 
 
 def detect_environment_values(platform: str, framework: str | None = None) -> tuple[str, str]:
-    if platform in {"windows", "laptop"}:
+    if platform == "windows":
         terminal = "powershell" if os.name == "nt" else Path(os.environ.get("SHELL", "bash")).name
         os_name = os.environ.get("OS", "Windows") if os.name == "nt" else os.uname().sysname
         return os_name, terminal
@@ -605,9 +605,7 @@ def copy_runner(instance_name: str, target_dir: Path, platform: str, framework: 
     manifest = validated_framework_manifest(platform, framework)
     source = (platform_root(platform, framework) / manifest["runner"]).resolve()
     runner_text = source.read_text(encoding="utf-8")
-    runner_text = runner_text.replace('NAME = "laptop"', f'NAME = "{instance_name}"')
     runner_text = runner_text.replace('NAME = "pi"', f'NAME = "{instance_name}"')
-    runner_text = runner_text.replace("run_laptop", f"run_{instance_name}")
     runner_text = runner_text.replace("run_pi", f"run_{instance_name}")
     runner_path = target_dir / f"run_{instance_name}.py"
     runner_path.write_text(runner_text, encoding="utf-8")

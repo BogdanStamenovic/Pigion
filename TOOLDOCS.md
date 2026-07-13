@@ -1,16 +1,17 @@
 # Tool Authoring Guide
 
-This file documents how tools work in the current Pi runner, `pi/run_pi.py`, and how to add tools that behave correctly in the agent loop.
+This file documents how tools work in the built-in Pigion runner, `platforms/pigion/core/whatchdog.py`, and how to add runtime-specific tools that behave correctly in the generated agent loop.
 
 ## Tool Discovery
 
-The Pi runner loads tool docs from:
+The generated Pigion runner loads its selected tool docs from its package `exp/td.txt`. Source documentation and tool policy come from the runtime manifest and tool directory, for example:
 
 ```text
-pi/exp/td.txt
+platforms/pigion/linux/framework.json
+platforms/pigion/linux/exp/td.txt
 ```
 
-That file serves two purposes:
+The generated `exp/td.txt` serves two purposes:
 
 1. It is injected into the model prompt as the list of available tools.
 2. It is parsed by `tool_import()` to decide which Python modules to import.
@@ -30,7 +31,7 @@ Example:
 For that line, the runner imports:
 
 ```python
-from pi.tools.fileread import fileread
+from local_watchdog.tools.fileread import fileread
 ```
 
 The parser is currently brittle: avoid extra commas before the `Command - ...` field, and keep the command prefix identical to the Python function name.
@@ -42,7 +43,7 @@ Special case: `return` maps to the module name `return_value` during import, but
 Create a file in:
 
 ```text
-pi/tools/<toolname>.py
+platforms/pigion/<runtime>/tools/<toolname>.py
 ```
 
 The file must expose a callable with the same name as the tool prefix:
@@ -52,7 +53,7 @@ def toolname(command, memory, local_state, program_state):
     ...
 ```
 
-The current Pi runner calls tools like this:
+The current Pigion runner calls tools like this:
 
 ```python
 TOOLS[prefix](suffix, memory, local_state, program_state=program_state)
@@ -112,7 +113,7 @@ Some actions are intercepted in `run_tool()` before dynamic dispatch:
 - `return:TEXT` appends to the global `returned_output`.
 - `askuser:QUESTION` calls Python `input()` and returns the answer.
 
-Because of that, `pi/tools/return_value.py` and `pi/tools/askuser.py` are compatibility/stale files rather than examples of the current tool contract. A new tool should follow the standard signature and return shape above.
+Because of that, the platform `return_value.py` and `askuser.py` modules are compatibility files rather than the best examples of the standard dispatched-tool contract. A new tool should follow the signature and return shape above.
 
 ## State Rules
 
@@ -172,7 +173,7 @@ def uppercase(command, memory, local_state, program_state):
     }
 ```
 
-Add this to `pi/exp/td.txt`:
+Add equivalent documentation and a tool-policy entry to the runtime's `framework.json`; keep `exp/td.txt` aligned where a source copy is retained:
 
 ```text
 6.Uppercase, Description: Converts text to uppercase, Command - uppercase:TEXT, Example - uppercase:hello
@@ -188,7 +189,7 @@ Current `memadd` behavior:
 - `memadd:key=value` updates `local_state["MEMORYVALS"][key]`.
 - Duplicate last-line plain-text memory writes are ignored.
 
-There is no source `memget` tool in the current `pi/tools` directory. If retrieval or embedded substitution is added later, implement it in `run_tool()` before dispatch so it works inside any tool input, and add the matching model-facing instructions to `pi/exp/td.txt`.
+There is no source `memget` tool in the current Pigion platform tools. If retrieval or embedded substitution is added later, implement it in `run_tool()` before dispatch so it works inside any tool input, and add matching model-facing documentation to the runtime manifest.
 
 The runner does not persist `memory` to disk by default.
 
@@ -246,7 +247,7 @@ When the interactive session ends, the runner asks the LLM to summarize what hap
 
 ## Where-Left-Off Summaries
 
-The Pi runner keeps interactive-session continuation notes in `program_state` for the current agent run:
+The Pigion runner keeps interactive-session continuation notes in `program_state` for the current agent run:
 
 ```python
 program_state["interactive_where_left_off"] = {
@@ -267,7 +268,7 @@ program_state["interactive_where_left_off"] = {
 
 At the start of a later interactive session in the same working-directory identifier, the runner asks the LLM whether the previous summary is relevant to the current goal and current step. The summary and decision are printed to the console. If the LLM chooses to continue, shell resumes the saved live branch session when it still exists. If the decider also returns a `resume_input`, the runner sends that input into the resumed branch before the normal interactive loop continues. The execution is recorded in `program_state["interactive_resume_executed"]`.
 
-The shell tool is wired into this store. When a new shell branch session starts in a cwd that has a saved where-left-off summary, `pi/tools/shell.py` prepends a compact summary to the first branch output and records shell-specific metadata:
+The Linux shell tool is wired into this store. When a new shell branch session starts in a cwd that has a saved where-left-off summary, `platforms/pigion/linux/tools/shell.py` prepends a compact summary to the first branch output and records shell-specific metadata:
 
 ```python
 program_state["SHELL_WHERE_LEFT_OFF_CWD"]
@@ -325,7 +326,7 @@ For shell-like tools, do not derive a new label from every interactive input. If
 
 ## Current Shell Interactive Design
 
-`pi/tools/shell.py` has two PTYs:
+`platforms/pigion/linux/tools/shell.py` has two PTYs:
 
 - Main shell PTY for ordinary commands.
 - Branch shell PTY for interactive programs.
@@ -396,7 +397,7 @@ Keep tool output useful for the evaluator:
 - Preserve enough command output for debugging.
 - Use strings unless the model benefits from structured JSON-like data.
 
-For verbose tools, consider truncation logic like `pi/tools/shell.py`.
+For verbose tools, consider truncation logic like the Linux platform `shell.py`.
 
 ## Error Handling
 
@@ -447,15 +448,15 @@ def fileread(command, memory, local_state, program_state):
 
 Before adding a tool:
 
-- Add `pi/tools/<toolname>.py`.
+- Add `platforms/pigion/<runtime>/tools/<toolname>.py`.
 - Define `def toolname(command, memory, local_state, program_state):`.
 - Return `ok`, `output`, `memory`, `state`, and `program_state`.
 - Update `last_tool_output` when useful.
 - Use `program_state` for internal metadata.
-- Add a `Command - toolname:...` entry to `pi/exp/td.txt`.
+- Add the tool, its `Command - toolname:...` documentation, and its required/default/optional policy to `platforms/pigion/<runtime>/framework.json`.
 - Keep the `td.txt` command prefix identical to the function name.
 - Keep the `Command - ...` field as the third comma-separated field.
-- Run `python3 -m py_compile pi/tools/<toolname>.py pi/run_pi.py`.
+- Run `python3 -m py_compile platforms/pigion/<runtime>/tools/<toolname>.py platforms/pigion/core/whatchdog.py`.
 
 For interactive tools:
 
@@ -467,12 +468,12 @@ For interactive tools:
 
 ## ShadowFS TODO
 
-ShadowFS is not implemented yet. The intended core-runtime direction is to stage agent file operations in a shadow filesystem layer, expose diffs or pending writes for inspection, and commit or discard those changes explicitly. This should live in the shared core runtime rather than only inside `pi/tools/shell.py`, because shell execution, file tools, recovery, and future platform runners all need the same file-mutation boundary.
+ShadowFS is not implemented yet. The intended direction is to stage agent file operations in a shadow filesystem layer, expose diffs or pending writes for inspection, and commit or discard those changes explicitly. It must cover the framework runner and relevant tools rather than existing only inside one runtime's `shell.py`.
 
 ## Current Tool Compatibility Notes
 
 - `shell`, `memadd`, and the normal path of `search` follow the current `program_state`-aware contract.
-- `askuser:` is handled directly by `run_tool()`, but `pi/tools/askuser.py` itself is stale.
+- `askuser:` is handled directly by `run_tool()`; the platform `askuser.py` files are compatibility modules.
 - `return:` is handled directly by `run_tool()`, while `return_value.py` is mostly a compatibility stub.
 - `search` has one retry-success path that returns without `program_state`.
-- `memget` is not currently available as a source tool, despite stale bytecode possibly existing in `pi/tools/__pycache__`.
+- `memget` is not currently available as a source platform tool.
