@@ -20,13 +20,13 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 
 from maker import (
+    FrameworkManifestError,
     create_instance,
-    detect_environment_values,
-    discover_frameworks,
-    discover_platforms,
-    discover_tools_for_platform,
     framework_env_questions,
     framework_metadata,
+    valid_framework_runtimes,
+    validate_tool_selection,
+    validated_framework_manifest,
     render_tool_docs,
     render_environment,
 )
@@ -501,6 +501,16 @@ def normalize_extra_env(raw_values: dict[str, str], framework: str, platform: st
         if question.get("required") and value == "":
             label = str(question.get("label") or name)
             raise ValueError(f"{label} is required for {framework}/{platform}.")
+        options = question.get("options")
+        if options and value not in options:
+            raise ValueError(f"{name} must be one of the configured options.")
+        validation = dict(question.get("validation") or {})
+        if len(value) < int(validation.get("min_length", 0)):
+            raise ValueError(f"{name} is shorter than the allowed minimum.")
+        if len(value) > int(validation.get("max_length", 2**31)):
+            raise ValueError(f"{name} is longer than the allowed maximum.")
+        if value and validation.get("pattern") and re.fullmatch(str(validation["pattern"]), value) is None:
+            raise ValueError(f"{name} does not match the required format.")
         answers[name] = value
     return answers
 
@@ -541,34 +551,28 @@ def device_env_values(device: dict[str, Any]) -> dict[str, str]:
     return values
 
 
-def framework_question_inputs(framework: str, platform: str) -> str:
-    questions = framework_env_questions(platform, framework)
-    if not questions:
-        return "<p class='muted'>No framework-specific questions.</p>"
-
-    fields: list[str] = []
-    for question in questions:
-        name = str(question["name"])
-        label = str(question.get("label") or name)
-        default = str(question.get("default") or "")
-        help_text = str(question.get("help") or "")
-        input_name = f"framework_env__{name}"
-        options = question.get("options")
-        if isinstance(options, list) and options:
-            option_tags = []
-            for option in options:
-                option_text = str(option)
-                selected = " selected" if option_text == default else ""
-                option_tags.append(f"<option value='{e(option_text)}'{selected}>{e(option_text)}</option>")
-            control = f"<select name='{e(input_name)}'>{''.join(option_tags)}</select>"
-        else:
-            input_type = "password" if question.get("secret") else "text"
-            control = f"<input name='{e(input_name)}' value='{e(default)}' type='{input_type}'>"
-        fields.append(
-            f"<label>{e(label)}</label>{control}"
-            + (f"<p class='muted'>{e(help_text)}</p>" if help_text else "")
-        )
-    return "".join(fields)
+def public_framework_spec(manifest: dict[str, Any]) -> dict[str, Any]:
+    questions = []
+    for question in manifest.get("questions", []):
+        public = dict(question)
+        if public.get("secret"):
+            public["default"] = ""
+        questions.append(public)
+    return {
+        "schema_version": manifest["schema_version"],
+        "framework": manifest["framework"],
+        "runtime": manifest["runtime"],
+        "display_name": manifest.get("display_name", manifest["framework"]),
+        "description": manifest.get("description", ""),
+        "supported_os": manifest["supported_os"],
+        "allow_zero_tools": bool(manifest.get("allow_zero_tools", False)),
+        "uses_pigion_model_config": bool(manifest.get("uses_pigion_model_config", True)),
+        "tools": manifest["tools"],
+        "questions": questions,
+        "lifecycle": sorted(manifest.get("lifecycle", {})),
+        "manifest_sha256": manifest["manifest_sha256"],
+        "framework_revision": manifest["framework_revision"],
+    }
 
 
 def normalize_llm_provider(raw_value: str) -> str:
@@ -751,6 +755,10 @@ def write_install_script(device: dict[str, Any]) -> str:
     sudo_password = str(device.get("sudo_password", ""))
     env_lines = [shell_env_assignment(key, value) for key, value in sorted(device_env_values(device).items())]
     env_file_body = "\n".join(env_lines)
+    lifecycle = dict(device.get("lifecycle") or {})
+    install_phase = "install" in lifecycle
+    upgrade_phase = "upgrade" in lifecycle
+    verify_phase = "verify" in lifecycle
     return textwrap.dedent(
         f"""#!/usr/bin/env bash
         set -euo pipefail
@@ -758,14 +766,11 @@ def write_install_script(device: dict[str, Any]) -> str:
         DEVICE_NAME={shlex.quote(device_name)}
         DEVICE_UUID={shlex.quote(device_uuid)}
         SERVER_URL={shlex.quote(server_url())}
-        DEVICE_API_TOKEN={shlex.quote(api_token)}
         DEVICE_SUDO_PASSWORD={shlex.quote(sudo_password)}
-        DEVICE_LLM_PROVIDER={shlex.quote(llm_provider)}
-        DEVICE_LLM_MODEL={shlex.quote(llm_model)}
-        DEVICE_OLLAMA_HOST={shlex.quote(ollama_host)}
-        DEVICE_OPENAI_BASE_URL={shlex.quote(openai_base_url)}
         INSTALL_ROOT="${{PIGION_INSTALL_ROOT:-/opt/pigion}}"
         INSTALL_DIR="$INSTALL_ROOT/$DEVICE_NAME"
+        WAS_INSTALLED=0
+        [ -d "$INSTALL_DIR" ] && WAS_INSTALLED=1
         SERVICE_NAME={shlex.quote(unit_name)}
         SERVICE_USER="${{PIGION_SERVICE_USER:-${{SUDO_USER:-$(id -un)}}}}"
         SERVICE_GROUP="${{PIGION_SERVICE_GROUP:-$(id -gn "$SERVICE_USER")}}"
@@ -784,6 +789,18 @@ def write_install_script(device: dict[str, Any]) -> str:
             printf '%s\\n' "$DEVICE_SUDO_PASSWORD" | sudo -S -p '' "$@"
           else
             sudo "$@"
+          fi
+        }}
+
+        run_as_service() {{
+          if [ "$(id -un)" = "$SERVICE_USER" ]; then
+            HOME="$SERVICE_HOME" "$@"
+          elif [ "$(id -u)" -eq 0 ]; then
+            runuser -u "$SERVICE_USER" -- env HOME="$SERVICE_HOME" "$@"
+          elif [ -n "$DEVICE_SUDO_PASSWORD" ]; then
+            printf '%s\n' "$DEVICE_SUDO_PASSWORD" | sudo -S -p '' -u "$SERVICE_USER" -H "$@"
+          else
+            sudo -u "$SERVICE_USER" -H "$@"
           fi
         }}
 
@@ -819,6 +836,31 @@ def write_install_script(device: dict[str, Any]) -> str:
 EOF_ENV
         sed -i "s|ABS_PATH=__PIGION_INSTALL_DIR__|ABS_PATH=\\"$INSTALL_DIR\\"|" "$TMP_ENV"
         run_sudo install -m 0600 "$TMP_ENV" "$INSTALL_DIR/.env"
+        run_sudo chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
+
+        run_framework_phase() {{
+          PHASE="$1"
+          SCRIPT="$INSTALL_DIR/$DEVICE_NAME/lifecycle/$PHASE.sh"
+          [ -f "$SCRIPT" ] || return 0
+          run_as_service env \
+            PIGION_INSTALL_DIR="$INSTALL_DIR" \
+            PIGION_VENV_PYTHON="$VENV_PYTHON" \
+            PIGION_DEVICE_NAME="$DEVICE_NAME" \
+            PIGION_DEVICE_UUID="$DEVICE_UUID" \
+            PIGION_SERVER_URL="$SERVER_URL" \
+            PIGION_SELECTED_TOOLS={shlex.quote(','.join(device.get('selected_tools', [])))} \
+            PIGION_FRAMEWORK={shlex.quote(str(device.get('framework', 'pigion')))} \
+            PIGION_RUNTIME={shlex.quote(str(device.get('platform', 'linux')))} \
+            PIGION_SERVICE_USER="$SERVICE_USER" \
+            PIGION_SERVICE_HOME="$SERVICE_HOME" \
+            /bin/bash -c 'set -a; . "$1"; set +a; exec /bin/bash "$2"' framework-lifecycle "$INSTALL_DIR/.env" "$SCRIPT"
+        }}
+        if [ "$WAS_INSTALLED" -eq 1 ] && {"true" if upgrade_phase else "false"}; then
+          run_framework_phase upgrade
+        else
+          {"run_framework_phase install" if install_phase else ": # no framework install phase"}
+        fi
+        {"run_framework_phase verify" if verify_phase else ": # no framework verify phase"}
 
         TMP_UNINSTALL="$TMP_DIR/uninstall.sh"
         cat > "$TMP_UNINSTALL" <<'EOF_UNINSTALL'
@@ -829,6 +871,7 @@ SERVICE_NAME={shlex.quote(unit_name)}
 INSTALL_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 INSTALL_ROOT="$(dirname "$INSTALL_DIR")"
 ENV_FILE="$INSTALL_DIR/.env"
+FRAMEWORK_UNINSTALL="$INSTALL_DIR/{e(str(device_name))}/lifecycle/uninstall.sh"
 
 if [ -f "$ENV_FILE" ]; then
   set -a
@@ -848,6 +891,10 @@ run_sudo() {{
     sudo "$@"
   fi
 }}
+
+if [ -f "$FRAMEWORK_UNINSTALL" ]; then
+  run_sudo env PIGION_INSTALL_DIR="$INSTALL_DIR" /bin/bash -c 'set -a; . "$1"; set +a; exec /bin/bash "$2"' framework-uninstall "$ENV_FILE" "$FRAMEWORK_UNINSTALL"
+fi
 
 FINAL_SCRIPT="$(mktemp "/tmp/${{SERVICE_NAME}}-uninstall.XXXXXX.sh")"
 cat > "$FINAL_SCRIPT" <<EOF_FINAL
@@ -915,6 +962,28 @@ def write_windows_install_script(device: dict[str, Any]) -> str:
     task_name = f"Pigion_{device_name}"
     env_lines = [dotenv_assignment(key, value) for key, value in sorted(device_env_values(device).items())]
     env_file_body = "\r\n".join(env_lines)
+    lifecycle = dict(device.get("lifecycle") or {})
+    framework_env_assignments = "\n".join(
+        f"            $env:{key} = {powershell_single_quote(value)}"
+        for key, value in sorted(device_env_values(device).items())
+    )
+    if "upgrade" in lifecycle:
+        install_script = "install" if "install" in lifecycle else ""
+        windows_setup_phase = f'''            if ($WasInstalled) {{
+                $PhaseScript = Join-Path $InstallDir "{device_name}\\lifecycle\\upgrade.ps1"
+            }} else {{
+                $PhaseScript = Join-Path $InstallDir "{device_name}\\lifecycle\\{install_script}.ps1"
+            }}
+            if ($PhaseScript -and (Test-Path $PhaseScript)) {{ & $PhaseScript; if ($LASTEXITCODE -ne 0) {{ throw "Framework setup failed" }} }}'''
+    elif "install" in lifecycle:
+        windows_setup_phase = f'''            $PhaseScript = Join-Path $InstallDir "{device_name}\\lifecycle\\install.ps1"
+            if (Test-Path $PhaseScript) {{ & $PhaseScript; if ($LASTEXITCODE -ne 0) {{ throw "Framework install failed" }} }}'''
+    else:
+        windows_setup_phase = ""
+    windows_verify_phase = ""
+    if "verify" in lifecycle:
+        windows_verify_phase = f'''            $PhaseScript = Join-Path $InstallDir "{device_name}\\lifecycle\\verify.ps1"
+            if (Test-Path $PhaseScript) {{ & $PhaseScript; if ($LASTEXITCODE -ne 0) {{ throw "Framework verify failed" }} }}'''
     return textwrap.dedent(
         f"""
         $ErrorActionPreference = "Stop"
@@ -925,6 +994,7 @@ def write_windows_install_script(device: dict[str, Any]) -> str:
         $TaskName = {powershell_single_quote(task_name)}
         $InstallRoot = if ($env:PIGION_INSTALL_ROOT) {{ $env:PIGION_INSTALL_ROOT }} else {{ Join-Path $env:LOCALAPPDATA "Pigion" }}
         $InstallDir = Join-Path $InstallRoot $DeviceName
+        $WasInstalled = Test-Path $InstallDir
         $VenvDir = Join-Path $InstallDir ".venv"
         $VenvPython = Join-Path $VenvDir "Scripts\\python.exe"
         $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pigion-" + [System.Guid]::NewGuid().ToString("N"))
@@ -969,6 +1039,18 @@ def write_windows_install_script(device: dict[str, Any]) -> str:
             $EnvText = $EnvText -replace 'ABS_PATH="__PIGION_INSTALL_DIR__"', ('ABS_PATH="' + $SafeInstallDir + '"')
             Write-Utf8NoBom -Path (Join-Path $InstallDir ".env") -Text ($EnvText.TrimEnd() + "`r`n")
 
+            $env:PIGION_INSTALL_DIR = $InstallDir
+            $env:PIGION_VENV_PYTHON = $VenvPython
+            $env:PIGION_DEVICE_NAME = $DeviceName
+            $env:PIGION_DEVICE_UUID = $DeviceUuid
+            $env:PIGION_SERVER_URL = $ServerUrl
+            $env:PIGION_SELECTED_TOOLS = {powershell_single_quote(','.join(device.get('selected_tools', [])))}
+            $env:PIGION_FRAMEWORK = {powershell_single_quote(str(device.get('framework', 'pigion')))}
+            $env:PIGION_RUNTIME = {powershell_single_quote(str(device.get('platform', 'windows')))}
+{framework_env_assignments}
+{windows_setup_phase}
+{windows_verify_phase}
+
             $MonitorScript = @'
 $ErrorActionPreference = "Continue"
 $InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -986,8 +1068,10 @@ while ($true) {{
 $ErrorActionPreference = "Continue"
 `$InstallDir = Split-Path -Parent `$MyInvocation.MyCommand.Path
 `$TaskName = "$TaskName"
+`$FrameworkUninstall = Join-Path `$InstallDir "{device_name}\\lifecycle\\uninstall.ps1"
 Start-Sleep -Seconds 5
 Unregister-ScheduledTask -TaskName `$TaskName -Confirm:`$false -ErrorAction SilentlyContinue
+if (Test-Path `$FrameworkUninstall) {{ & `$FrameworkUninstall }}
 Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" | Where-Object {{ `$_.CommandLine -like "*`$InstallDir*" }} | ForEach-Object {{ Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }}
 `$Parent = Split-Path -Parent `$InstallDir
 Remove-Item -Recurse -Force `$InstallDir -ErrorAction SilentlyContinue
@@ -1184,37 +1268,22 @@ def remove_device(request: Request, device_uuid: str) -> str:
 @app.get("/register", response_class=HTMLResponse)
 def register_page(request: Request) -> str:
     require_login(request)
-    platform_blocks = []
-    platform_options = []
-    for framework in discover_frameworks():
-        for platform in discover_platforms(framework):
-            option_value = f"{framework}::{platform}"
-            platform_options.append(f"<option value='{e(option_value)}'>{e(framework)}/{e(platform)}</option>")
-            tools = discover_tools_for_platform(platform, framework)
-            try:
-                default_os, default_terminal = detect_environment_values(platform, framework)
-            except Exception:
-                default_os, default_terminal = "", ""
-            tool_docs = render_tool_docs(tools, platform, framework) if tools else ""
-            metadata = framework_metadata(platform, framework)
-            description = str(metadata.get("description") or "").strip()
-            question_html = framework_question_inputs(framework, platform)
-            platform_blocks.append(
-                f"<section><h3>{e(framework)}/{e(platform)} discovered tools</h3>"
-                f"{f'<p>{e(description)}</p>' if description else ''}"
-                f"<p><code>{e(', '.join(tools) or 'none')}</code></p>"
-                f"{f'<pre>{e(tool_docs)}</pre>' if tool_docs else '<p class=\"muted\">No tools found.</p>'}"
-                f"<p class='muted'>Suggested OS: {e(default_os)}; terminal: {e(default_terminal)}</p>"
-                f"<h4>Framework questions</h4>{question_html}</section>"
-            )
+    runtimes, invalid = valid_framework_runtimes()
+    platform_options = [
+        f"<option value='{e(framework)}::{e(platform)}'>{e(framework)}/{e(platform)}</option>"
+        for framework, platform in runtimes
+    ]
+    diagnostics = "".join(f"<li><code>{e(key)}</code>: {e(error)}</li>" for key, error in invalid.items())
     return layout(
         "Register Device",
         f"""<form class="panel" method="post" action="/register">
   <h1>Register Device</h1>
   <label>Watchdog name</label><input name="name" placeholder="kitchen_pi" required>
-  <label>Framework/runtime template</label><select name="framework_platform" required>{''.join(platform_options)}</select>
+  <label>Framework/runtime template</label><select id="framework_platform" name="framework_platform" required>{''.join(platform_options)}</select>
+  <section id="framework_spec"><p class="muted">Loading framework specification...</p></section>
   <label>Device OS</label><input name="device_os" placeholder="Raspberry Pi OS / Ubuntu / Windows / ..." required>
   <label>Device terminal</label><input name="device_terminal" placeholder="bash / zsh / powershell / ..." required>
+  <section id="pigion_model_config"><h2>Pigion model configuration</h2>
   <label>Model provider</label><select name="llm_provider" required>
     <option value="gemini">Gemini</option>
     <option value="openai">OpenAI</option>
@@ -1224,14 +1293,69 @@ def register_page(request: Request) -> str:
   <label>Model API key</label><input name="api_token" type="password" autocomplete="off" placeholder="Leave blank for Ollama">
   <label>Ollama host</label><input name="ollama_host" placeholder="http://192.168.1.50:11434">
   <label>OpenAI base URL</label><input name="openai_base_url" value="https://api.openai.com/v1">
+  </section>
   <label>Sudo password</label><input name="sudo_password" type="password" autocomplete="off">
   <label>td.txt capability block</label><textarea name="capability_block" placeholder="Leave blank to use the discovered framework/runtime tool docs automatically."></textarea>
-  <h2>Tools</h2>
-  <p class="muted">Tools are discovered automatically from the chosen framework/runtime td.txt and tool files.</p>
-  {''.join(platform_blocks)}
+  {f'<details><summary>Invalid framework diagnostics</summary><ul>{diagnostics}</ul></details>' if diagnostics else ''}
   <p><button type="submit">Register Device</button></p>
-</form>""",
+</form>
+<script src="/static/framework-registration.js"></script>""",
     )
+
+
+@app.get("/api/frameworks/{framework}/{platform}", response_class=JSONResponse)
+def framework_registration_spec(request: Request, framework: str, platform: str) -> dict[str, Any]:
+    require_login(request)
+    try:
+        return public_framework_spec(validated_framework_manifest(platform, framework))
+    except (FrameworkManifestError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/static/framework-registration.js", response_class=PlainTextResponse)
+def framework_registration_javascript() -> Response:
+    javascript = r"""
+const selector = document.getElementById('framework_platform');
+const panel = document.getElementById('framework_spec');
+function esc(value) { const node = document.createElement('span'); node.textContent = value == null ? '' : value; return node.innerHTML; }
+async function loadFrameworkSpec() {
+  if (!selector || !selector.value) { panel.innerHTML = '<p>No valid frameworks are installed.</p>'; return; }
+  const parts = selector.value.split('::');
+  const response = await fetch('/api/frameworks/' + encodeURIComponent(parts[0]) + '/' + encodeURIComponent(parts[1]));
+  if (!response.ok) { panel.textContent = await response.text(); return; }
+  const spec = await response.json();
+  const modelConfig = document.getElementById('pigion_model_config');
+  if (modelConfig) {
+    modelConfig.hidden = !spec.uses_pigion_model_config;
+    modelConfig.querySelectorAll('input, select').forEach(function(control) { control.disabled = !spec.uses_pigion_model_config; });
+  }
+  let output = '<h2>' + esc(spec.display_name) + ' / ' + esc(spec.runtime) + '</h2><p>' + esc(spec.description) + '</p>';
+  output += '<p class="muted">Supported OS: ' + spec.supported_os.map(esc).join(', ') + '. Install lifecycle: ' + (spec.lifecycle.map(esc).join(', ') || 'shared Pigion installer only') + '</p><h3>Tools</h3>';
+  for (const tool of spec.tools) {
+    const checked = tool.policy === 'required' || tool.policy === 'default';
+    const locked = tool.policy === 'required';
+    output += '<label><input type="checkbox" name="selected_tools" value="' + esc(tool.name) + '" ' + (checked ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '> ' + esc(tool.name) + ' <small>(' + esc(tool.policy) + ')</small></label>';
+    if (locked) output += '<input type="hidden" name="selected_tools" value="' + esc(tool.name) + '">';
+    output += '<p class="muted">' + esc(tool.documentation) + '</p>';
+  }
+  output += '<h3>Framework configuration</h3>';
+  if (!spec.questions.length) output += '<p class="muted">No framework-specific configuration.</p>';
+  for (const question of spec.questions) {
+    const name = 'framework_env__' + question.name;
+    output += '<label>' + esc(question.label || question.name) + '</label>';
+    if (question.options && question.options.length) {
+      output += '<select name="' + esc(name) + '">' + question.options.map(function(option) { return '<option value="' + esc(option) + '" ' + (option === question.default ? 'selected' : '') + '>' + esc(option) + '</option>'; }).join('') + '</select>';
+    } else {
+      const type = question.secret ? 'password' : (question.type === 'url' ? 'url' : 'text');
+      output += '<input name="' + esc(name) + '" type="' + type + '" value="' + esc(question.default || '') + '" ' + (question.required ? 'required' : '') + '>';
+    }
+    if (question.help) output += '<p class="muted">' + esc(question.help) + '</p>';
+  }
+  panel.innerHTML = output;
+}
+if (selector) { selector.addEventListener('change', loadFrameworkSpec); loadFrameworkSpec(); }
+"""
+    return Response(content=javascript, media_type="application/javascript")
 
 
 @app.post("/register", response_class=HTMLResponse)
@@ -1239,6 +1363,7 @@ async def register(request: Request) -> str:
     require_login(request)
     raw_body = await request.body()
     data = form_data(raw_body)
+    values = form_values(raw_body)
     name = data.get("name", "").strip()
     try:
         framework, platform = parse_framework_platform(
@@ -1246,10 +1371,15 @@ async def register(request: Request) -> str:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        manifest = validated_framework_manifest(platform, framework)
+    except (FrameworkManifestError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     device_os = data.get("device_os", "").strip()
     device_terminal = data.get("device_terminal", "").strip()
     try:
-        llm_provider = normalize_llm_provider(data.get("llm_provider", "gemini"))
+        provider_value = data.get("llm_provider", "gemini") if manifest.get("uses_pigion_model_config", True) else "ollama"
+        llm_provider = normalize_llm_provider(provider_value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     llm_model = data.get("llm_model", "").strip() or default_llm_model(llm_provider)
@@ -1262,17 +1392,14 @@ async def register(request: Request) -> str:
         framework_env = normalize_extra_env(data, framework, platform)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if llm_provider in {"gemini", "openai"} and not api_token:
+    if manifest.get("uses_pigion_model_config", True) and llm_provider in {"gemini", "openai"} and not api_token:
         raise HTTPException(status_code=400, detail="Model API key is required for Gemini and OpenAI.")
-    selected_tools = discover_tools_for_platform(platform, framework)
-    if not selected_tools:
-        raise HTTPException(status_code=400, detail="No tools were discovered for that framework/runtime.")
+    try:
+        selected_tools = validate_tool_selection(values.get("selected_tools", []), platform, framework)
+    except (FrameworkManifestError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not capability_block:
         capability_block = default_capability_block(framework, platform, selected_tools)
-    pull = subprocess.run(["git", "pull"], cwd=PROJECT_ROOT, text=True, capture_output=True)
-    if pull.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"git pull failed: {pull.stderr or pull.stdout}")
-
     environment_text = render_environment(device_os, device_terminal)
     try:
         runner_path = create_instance(
@@ -1302,6 +1429,9 @@ async def register(request: Request) -> str:
         "command": command,
         "framework": framework,
         "platform": platform,
+        "manifest_schema_version": manifest["schema_version"],
+        "framework_revision": manifest["framework_revision"],
+        "lifecycle": manifest.get("lifecycle", {}),
         "selected_tools": selected_tools,
         "device_os": device_os,
         "device_terminal": device_terminal,
@@ -1320,7 +1450,6 @@ async def register(request: Request) -> str:
         "runner_path": str(runner_path.relative_to(PROJECT_ROOT)),
         "runner_module": runner_module,
         "installer_path": str(installer_path),
-        "git_pull_output": (pull.stdout or pull.stderr).strip(),
     }
     installer_text = write_windows_install_script(device) if is_windows_platform(platform) else write_install_script(device)
     installer_path.write_text(installer_text, encoding="utf-8")

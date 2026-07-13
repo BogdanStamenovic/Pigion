@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "framework": "pigion",
+  "runtime": "linux",
+  "display_name": "Pigion",
+  "description": "Built-in Pigion watchdog for Linux.",
+  "supported_os": ["linux"],
+  "runner": "../core/whatchdog.py",
+  "allow_zero_tools": false,
+  "uses_pigion_model_config": true,
+  "tools": [
+    {"name":"shell","module":"shell.py","policy":"default","documentation":"Shell, Description: Executes a shell command and returns stdout/stderr, Command - shell:COMMAND, Example - shell:echo hi"},
+    {"name":"memadd","module":"memadd.py","policy":"default","documentation":"Memory, Description: Stores temporary context memory for the current session, Command - memadd:TEXT_OR_KEY=VALUE, Example - memadd:User prefers Python"},
+    {"name":"search","module":"search.py","policy":"default","documentation":"Search, Description: Performs web search or extracts URL content, Command - search:QUERY_OR_URL, Example - search:openai api"},
+    {"name":"permamemory","module":"permamemory.py","policy":"default","documentation":"PermanentMemory, Description: Stores and retrieves permanent memories, Command - permamemory:ACTION_OR_KEY=VALUE, Example - permamemory:list"},
+    {"name":"return","module":"return_value.py","policy":"default","documentation":"Return, Description: Returns the final answer, Command - return:TEXT, Example - return:Done"},
+    {"name":"askuser","module":"askuser.py","policy":"default","documentation":"AskUser, Description: Asks the user for information, Command - askuser:TEXT, Example - askuser:Provide location"}
+  ],
+  "questions": [],
+  "lifecycle": {}
+}

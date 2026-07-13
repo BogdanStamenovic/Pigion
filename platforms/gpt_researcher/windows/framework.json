@@ -1,6 +1,21 @@
 {
+  "schema_version": 1,
+  "framework": "gpt_researcher",
+  "runtime": "windows",
   "display_name": "GPT Researcher",
   "description": "Windows research watchdog wrapper using GPT Researcher with configurable Ollama inference, nomic embeddings, SearXNG search, Playwright browsing, Trafilatura or Crawl4AI extraction, and optional Qdrant memory.",
+  "supported_os": ["windows"],
+  "runner": "../core/whatchdog.py",
+  "allow_zero_tools": false,
+  "uses_pigion_model_config": false,
+  "tools": [
+    {
+      "name": "research",
+      "module": "research.py",
+      "policy": "required",
+      "documentation": "Research, Description: Runs a GPT Researcher deep-research task, Command - research:TOPIC, Example - research:Compare local-first AI research stacks"
+    }
+  ],
   "questions": [
     {
       "name": "GPT_RESEARCHER_LLM_MODEL",
@@ -56,5 +71,6 @@
       "options": ["research_report", "resource_report", "outline_report", "custom_report"],
       "required": true
     }
-  ]
+  ],
+  "lifecycle": {"install": "lifecycle/install.ps1", "verify": "lifecycle/verify.ps1"}
 }

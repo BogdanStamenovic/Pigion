@@ -1,27 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 
 NAME = "gpt_researcher"
-
-REQUIRED_PACKAGES = {
-    "gpt_researcher": "gpt-researcher",
-    "langchain_ollama": "langchain-ollama",
-    "playwright": "playwright",
-    "trafilatura": "trafilatura",
-}
-OPTIONAL_PACKAGES = {
-    "crawl4ai": "crawl4ai",
-    "qdrant_client": "qdrant-client",
-}
-
 
 def _parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
@@ -50,79 +36,6 @@ def _load_generated_env() -> None:
     for env_file in env_files:
         for key, value in _parse_env_file(env_file).items():
             os.environ.setdefault(key, value)
-
-
-def _run(command: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True, timeout=timeout)
-
-
-def _module_missing(module_name: str) -> bool:
-    return importlib.util.find_spec(module_name) is None
-
-
-def _pip_install(packages: list[str]) -> None:
-    if not packages:
-        return
-    result = _run([sys.executable, "-m", "pip", "install", *packages], timeout=1200)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"Failed to install GPT Researcher dependencies: {detail}")
-
-
-def _install_playwright_browser() -> None:
-    if os.environ.get("PIGION_GPT_RESEARCHER_SKIP_PLAYWRIGHT_INSTALL") == "1":
-        return
-    browser = os.environ.get("GPT_RESEARCHER_PLAYWRIGHT_BROWSER", "chromium")
-    result = _run([sys.executable, "-m", "playwright", "install", browser], timeout=1200)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise RuntimeError(f"Failed to install Playwright browser '{browser}': {detail}")
-
-
-def _ensure_dependencies() -> list[str]:
-    if os.environ.get("PIGION_GPT_RESEARCHER_SKIP_DEP_INSTALL") == "1":
-        return ["dependency install skipped by PIGION_GPT_RESEARCHER_SKIP_DEP_INSTALL=1"]
-
-    packages = dict(REQUIRED_PACKAGES)
-    extraction = os.environ.get("GPT_RESEARCHER_EXTRACTION", "trafilatura").strip().lower()
-    if extraction == "crawl4ai":
-        packages["crawl4ai"] = OPTIONAL_PACKAGES["crawl4ai"]
-    if os.environ.get("GPT_RESEARCHER_QDRANT_URL", "").strip():
-        packages["qdrant_client"] = OPTIONAL_PACKAGES["qdrant_client"]
-
-    missing = [package for module, package in packages.items() if _module_missing(module)]
-    if missing:
-        _pip_install(missing)
-
-    notes = [f"installed python packages: {', '.join(missing)}" if missing else "python packages already present"]
-    if _module_missing("playwright"):
-        notes.append("playwright import unavailable after dependency install")
-    else:
-        _install_playwright_browser()
-        notes.append("playwright browser installed")
-    return notes
-
-
-def _pull_ollama_model(model: str) -> str:
-    if os.environ.get("PIGION_GPT_RESEARCHER_SKIP_OLLAMA_PULL") == "1":
-        return f"skipped ollama pull for {model}"
-    if not model:
-        return "no ollama model configured"
-    if not shutil_which("ollama"):
-        return "ollama CLI not found; model pull skipped"
-    result = _run(["ollama", "pull", model], timeout=1800)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        return f"ollama pull {model} failed: {detail}"
-    return f"ollama model ready: {model}"
-
-
-def shutil_which(binary: str) -> str | None:
-    for item in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = Path(item) / binary
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
 
 
 def _configure_research_env() -> dict[str, str]:
@@ -182,11 +95,6 @@ async def _run_research(goal: str, report_type: str) -> str:
 
 def run_agent(goal: str) -> dict[str, Any]:
     config = _configure_research_env()
-    install_notes = _ensure_dependencies()
-    pull_notes = [
-        _pull_ollama_model(config["llm"]),
-        _pull_ollama_model(config["embedding"]),
-    ]
     if os.environ.get("PIGION_GPT_RESEARCHER_DRY_RUN") == "1":
         return {
             "ok": True,
@@ -194,8 +102,6 @@ def run_agent(goal: str) -> dict[str, Any]:
             "dry_run": True,
             "goal": goal,
             "config": config,
-            "install_notes": install_notes,
-            "pull_notes": pull_notes,
         }
 
     report = asyncio.run(_run_research(goal, config["report_type"]))
@@ -204,8 +110,6 @@ def run_agent(goal: str) -> dict[str, Any]:
         "framework": "gpt_researcher",
         "goal": goal,
         "config": config,
-        "install_notes": install_notes,
-        "pull_notes": pull_notes,
         "output": report,
     }
 

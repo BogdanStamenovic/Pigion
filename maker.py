@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,14 @@ TOOL_DOCS = {
 TOOL_MODULE_NAMES = {
     "return": "return_value.py",
 }
+
+MANIFEST_SCHEMA_VERSION = 1
+TOOL_POLICIES = {"required", "default", "optional"}
+LIFECYCLE_PHASES = {"install", "verify", "upgrade", "uninstall"}
+
+
+class FrameworkManifestError(ValueError):
+    """Raised when a framework/runtime manifest is unsafe or invalid."""
 
 
 def discover_tools() -> list[str]:
@@ -143,9 +152,178 @@ def framework_metadata(platform: str, framework: str | None = None) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _safe_runtime_file(runtime_root: Path, raw_path: str, label: str) -> Path:
+    relative = Path(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise FrameworkManifestError(f"{label} must be a relative path inside {runtime_root}.")
+    resolved_root = runtime_root.resolve()
+    resolved = (runtime_root / relative).resolve()
+    if resolved == resolved_root or resolved_root not in resolved.parents:
+        raise FrameworkManifestError(f"{label} escapes framework runtime directory.")
+    if not resolved.is_file():
+        raise FrameworkManifestError(f"{label} does not exist: {resolved}")
+    return resolved
+
+
+def validated_framework_manifest(platform: str, framework: str | None = None) -> dict:
+    framework = normalize_framework(framework)
+    runtime_root = platform_root(platform, framework)
+    path = framework_metadata_path(platform, framework)
+    if not path.is_file():
+        raise FrameworkManifestError(f"Framework manifest not found: {path}")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FrameworkManifestError(f"Invalid JSON in {path}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise FrameworkManifestError(f"{path} must use schema_version {MANIFEST_SCHEMA_VERSION}.")
+    if str(manifest.get("framework") or framework) != framework:
+        raise FrameworkManifestError(f"Manifest framework must be {framework!r}.")
+    if str(manifest.get("runtime") or platform) != platform:
+        raise FrameworkManifestError(f"Manifest runtime must be {platform!r}.")
+    if not isinstance(manifest.get("uses_pigion_model_config", True), bool):
+        raise FrameworkManifestError("uses_pigion_model_config must be boolean.")
+    supported_os = manifest.get("supported_os")
+    if not isinstance(supported_os, list) or not supported_os or not all(isinstance(x, str) and x for x in supported_os):
+        raise FrameworkManifestError("supported_os must be a non-empty list of strings.")
+    installer_os = "windows" if platform in {"windows", "win", "win32"} else "linux"
+    if installer_os not in {item.strip().lower() for item in supported_os}:
+        raise FrameworkManifestError(
+            f"Runtime {platform!r} uses the {installer_os} installer but supported_os does not include {installer_os!r}."
+        )
+    runner = str(manifest.get("runner") or "../core/whatchdog.py")
+    runner_relative = Path(runner)
+    runner_path = (runtime_root / runner_relative).resolve()
+    resolved_framework_root = framework_root(framework).resolve()
+    if runner_relative.is_absolute() or runner_path == resolved_framework_root or resolved_framework_root not in runner_path.parents or not runner_path.is_file():
+        raise FrameworkManifestError("runner must resolve to a file inside the framework directory.")
+
+    tools = manifest.get("tools")
+    if not isinstance(tools, list):
+        raise FrameworkManifestError("tools must be a list.")
+    seen: set[str] = set()
+    normalized_tools: list[dict] = []
+    for index, item in enumerate(tools):
+        if not isinstance(item, dict):
+            raise FrameworkManifestError(f"tools[{index}] must be an object.")
+        name = str(item.get("name") or "").strip().lower()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in seen:
+            raise FrameworkManifestError(f"Invalid or duplicate tool name: {name!r}.")
+        policy = str(item.get("policy") or "").strip().lower()
+        if policy not in TOOL_POLICIES:
+            raise FrameworkManifestError(f"Tool {name!r} has invalid policy {policy!r}.")
+        module = str(item.get("module") or TOOL_MODULE_NAMES.get(name, f"{name}.py"))
+        _safe_runtime_file(runtime_root, f"tools/{module}", f"tool {name}")
+        documentation = str(item.get("documentation") or "").strip()
+        if not documentation or extract_tool_name_from_doc(documentation) != name:
+            raise FrameworkManifestError(f"Tool {name!r} needs documentation with Command - {name}:...")
+        normalized_tools.append({**item, "name": name, "policy": policy, "module": module, "documentation": documentation})
+        seen.add(name)
+    if not manifest.get("allow_zero_tools", False) and not tools:
+        raise FrameworkManifestError("At least one tool is required when allow_zero_tools is false.")
+
+    questions = manifest.get("questions", [])
+    if not isinstance(questions, list):
+        raise FrameworkManifestError("questions must be a list.")
+    question_names: set[str] = set()
+    for index, question in enumerate(questions):
+        if not isinstance(question, dict):
+            raise FrameworkManifestError(f"questions[{index}] must be an object.")
+        name = str(question.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in question_names:
+            raise FrameworkManifestError(f"Invalid or duplicate question name: {name!r}.")
+        if question.get("type", "text") not in {"text", "password", "select", "url"}:
+            raise FrameworkManifestError(f"Question {name!r} has an invalid type.")
+        options = question.get("options")
+        if options is not None and (not isinstance(options, list) or not all(isinstance(x, str) for x in options)):
+            raise FrameworkManifestError(f"Question {name!r} options must be strings.")
+        validation = question.get("validation", {})
+        if not isinstance(validation, dict) or set(validation) - {"pattern", "min_length", "max_length"}:
+            raise FrameworkManifestError(f"Question {name!r} has invalid validation fields.")
+        if "pattern" in validation:
+            try:
+                re.compile(str(validation["pattern"]))
+            except re.error as exc:
+                raise FrameworkManifestError(f"Question {name!r} has an invalid validation pattern.") from exc
+        for length_key in ("min_length", "max_length"):
+            if length_key in validation and (not isinstance(validation[length_key], int) or validation[length_key] < 0):
+                raise FrameworkManifestError(f"Question {name!r} {length_key} must be a non-negative integer.")
+        if validation.get("min_length", 0) > validation.get("max_length", 2**31):
+            raise FrameworkManifestError(f"Question {name!r} minimum length exceeds maximum length.")
+        question_names.add(name)
+
+    lifecycle = manifest.get("lifecycle", {})
+    if not isinstance(lifecycle, dict) or set(lifecycle) - LIFECYCLE_PHASES:
+        raise FrameworkManifestError("lifecycle may contain only install, verify, upgrade, and uninstall.")
+    normalized_lifecycle: dict[str, str] = {}
+    for phase, script in lifecycle.items():
+        if not isinstance(script, str) or not script:
+            raise FrameworkManifestError(f"Lifecycle {phase!r} must be a script path.")
+        source = _safe_runtime_file(runtime_root, script, f"lifecycle {phase}")
+        normalized_lifecycle[phase] = str(source.relative_to(runtime_root))
+
+    raw = path.read_bytes()
+    revision = hashlib.sha256(raw)
+    revision.update(runner_path.read_bytes())
+    for tool in normalized_tools:
+        revision.update(tool["name"].encode("utf-8"))
+        revision.update(_safe_runtime_file(runtime_root, f"tools/{tool['module']}", f"tool {tool['name']}").read_bytes())
+    for phase, relative in sorted(normalized_lifecycle.items()):
+        revision.update(phase.encode("utf-8"))
+        revision.update(_safe_runtime_file(runtime_root, relative, f"lifecycle {phase}").read_bytes())
+    return {
+        **manifest,
+        "framework": framework,
+        "runtime": platform,
+        "runner": runner,
+        "tools": normalized_tools,
+        "questions": questions,
+        "lifecycle": normalized_lifecycle,
+        "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "framework_revision": revision.hexdigest(),
+    }
+
+
+def valid_framework_runtimes() -> tuple[list[tuple[str, str]], dict[str, str]]:
+    valid: list[tuple[str, str]] = []
+    invalid: dict[str, str] = {}
+    for framework in discover_frameworks():
+        for platform in discover_platforms(framework):
+            key = f"{framework}/{platform}"
+            try:
+                validated_framework_manifest(platform, framework)
+            except FrameworkManifestError as exc:
+                invalid[key] = str(exc)
+            else:
+                valid.append((framework, platform))
+    return valid, invalid
+
+
+def manifest_tools(platform: str, framework: str | None = None) -> list[dict]:
+    return list(validated_framework_manifest(platform, framework)["tools"])
+
+
+def default_tools_for_platform(platform: str, framework: str | None = None) -> list[str]:
+    return [tool["name"] for tool in manifest_tools(platform, framework) if tool["policy"] in {"required", "default"}]
+
+
+def validate_tool_selection(selected: list[str], platform: str, framework: str | None = None) -> list[str]:
+    manifest = validated_framework_manifest(platform, framework)
+    specs = {tool["name"]: tool for tool in manifest["tools"]}
+    requested = list(dict.fromkeys(str(name).strip().lower() for name in selected if str(name).strip()))
+    unknown = [name for name in requested if name not in specs]
+    if unknown:
+        raise ValueError(f"Unknown tool(s): {', '.join(unknown)}")
+    required = [tool["name"] for tool in manifest["tools"] if tool["policy"] == "required"]
+    selected_set = set(requested) | set(required)
+    ordered = [tool["name"] for tool in manifest["tools"] if tool["name"] in selected_set]
+    if not ordered and not manifest.get("allow_zero_tools", False):
+        raise ValueError(f"At least one tool must be selected for {manifest['framework']}/{platform}.")
+    return ordered
+
+
 def framework_env_questions(platform: str, framework: str | None = None) -> list[dict]:
-    questions = framework_metadata(platform, framework).get("questions", [])
-    return [item for item in questions if isinstance(item, dict) and item.get("name")]
+    return list(validated_framework_manifest(platform, framework).get("questions", []))
 
 
 def platform_tool_doc_lines(platform: str, framework: str | None = None) -> list[str]:
@@ -287,7 +465,10 @@ def render_tool_docs(
 
     # Try to load platform-provided td.txt first
     if platform:
-        base_lines = platform_tool_doc_lines(platform, framework)
+        try:
+            base_lines = [item["documentation"] for item in manifest_tools(platform, framework)]
+        except FrameworkManifestError:
+            base_lines = platform_tool_doc_lines(platform, framework)
 
     # Build a mapping of existing tool -> doc (keep first occurrence)
     existing: dict[str, str] = {}
@@ -389,6 +570,29 @@ def render_framework_env(values: dict[str, str]) -> str:
     return "".join(f"{key}={value}\n" for key, value in sorted(values.items()))
 
 
+def validate_framework_env(values: dict[str, str], platform: str, framework: str | None = None) -> dict[str, str]:
+    questions = framework_env_questions(platform, framework)
+    specs = {str(question["name"]): question for question in questions}
+    unknown = sorted(set(values) - set(specs))
+    if unknown:
+        raise ValueError(f"Unknown framework setting(s): {', '.join(unknown)}")
+    normalized: dict[str, str] = {}
+    for name, question in specs.items():
+        value = str(values.get(name, question.get("default", "")))
+        if question.get("required") and not value:
+            raise ValueError(f"{question.get('label') or name} is required.")
+        options = question.get("options")
+        if options and value not in options:
+            raise ValueError(f"{name} must be one of: {', '.join(options)}")
+        validation = dict(question.get("validation") or {})
+        if len(value) < int(validation.get("min_length", 0)) or len(value) > int(validation.get("max_length", 2**31)):
+            raise ValueError(f"{name} has an invalid length.")
+        if value and validation.get("pattern") and re.fullmatch(str(validation["pattern"]), value) is None:
+            raise ValueError(f"{name} does not match the required format.")
+        normalized[name] = value
+    return normalized
+
+
 def prompt_environment(platform: str, framework: str | None = None) -> str:
     detected_os, detected_terminal = detect_environment_values(platform, framework)
     print("\nEnvironment for this instance:")
@@ -397,8 +601,10 @@ def prompt_environment(platform: str, framework: str | None = None) -> str:
     return render_environment(os_name, terminal)
 
 
-def copy_runner(instance_name: str, target_dir: Path, framework: str | None = None) -> Path:
-    runner_text = runner_template_path(framework).read_text(encoding="utf-8")
+def copy_runner(instance_name: str, target_dir: Path, platform: str, framework: str | None = None) -> Path:
+    manifest = validated_framework_manifest(platform, framework)
+    source = (platform_root(platform, framework) / manifest["runner"]).resolve()
+    runner_text = source.read_text(encoding="utf-8")
     runner_text = runner_text.replace('NAME = "laptop"', f'NAME = "{instance_name}"')
     runner_text = runner_text.replace('NAME = "pi"', f'NAME = "{instance_name}"')
     runner_text = runner_text.replace("run_laptop", f"run_{instance_name}")
@@ -415,8 +621,9 @@ def copy_tools(
     framework: str | None = None,
 ) -> None:
     source_tools_dir = platform_tools_dir(platform, framework)
+    modules = {item["name"]: item["module"] for item in manifest_tools(platform, framework)}
     for tool in selected_tools:
-        module_name = TOOL_MODULE_NAMES.get(tool, f"{tool}.py")
+        module_name = modules[tool]
         source = source_tools_dir / module_name
         if not source.exists():
             raise FileNotFoundError(
@@ -424,6 +631,22 @@ def copy_tools(
                 f"platform '{platform}': {source}"
             )
         shutil.copy2(source, target_tools_dir / module_name)
+
+
+def copy_lifecycle(platform: str, target_dir: Path, framework: str | None = None) -> dict[str, str]:
+    manifest = validated_framework_manifest(platform, framework)
+    runtime_root = platform_root(platform, framework)
+    lifecycle_dir = target_dir / "lifecycle"
+    copied: dict[str, str] = {}
+    for phase, relative in manifest["lifecycle"].items():
+        lifecycle_dir.mkdir(exist_ok=True)
+        source = _safe_runtime_file(runtime_root, relative, f"lifecycle {phase}")
+        suffix = source.suffix or (".ps1" if platform == "windows" else ".sh")
+        destination = lifecycle_dir / f"{phase}{suffix}"
+        shutil.copy2(source, destination)
+        destination.chmod(destination.stat().st_mode | 0o100)
+        copied[phase] = str(destination.relative_to(target_dir))
+    return copied
 
 
 def create_instance(
@@ -455,8 +678,8 @@ def create_instance(
             + f" for framework {framework}. Available platforms: "
             + ", ".join(available_platforms)
         )
-    if not selected_tools:
-        raise ValueError("At least one tool must be selected.")
+    selected_tools = validate_tool_selection(selected_tools, platform, framework)
+    framework_env = validate_framework_env(framework_env or {}, platform, framework)
 
     target_dir = PROJECT_ROOT / instance_name
     if target_dir.exists():
@@ -472,8 +695,9 @@ def create_instance(
     (target_dir / "__init__.py").write_text("", encoding="utf-8")
     (tools_dir / "__init__.py").write_text("", encoding="utf-8")
 
-    runner_path = copy_runner(instance_name, target_dir, framework)
+    runner_path = copy_runner(instance_name, target_dir, platform, framework)
     copy_tools(platform, selected_tools, tools_dir, framework)
+    lifecycle = copy_lifecycle(platform, target_dir, framework)
 
     (exp_dir / "td.txt").write_text(render_tool_docs(selected_tools, platform, framework), encoding="utf-8")
     if environment_text is None:
@@ -482,6 +706,11 @@ def create_instance(
     if framework_env:
         (exp_dir / "framework_env.txt").write_text(render_framework_env(framework_env), encoding="utf-8")
     (exp_dir / "tool_import.txt").write_text(" ".join(selected_tools) + "\n", encoding="utf-8")
+    manifest = validated_framework_manifest(platform, framework)
+    (exp_dir / "framework_manifest.json").write_text(
+        json.dumps({**manifest, "selected_tools": selected_tools, "bundled_lifecycle": lifecycle}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     return runner_path
 
@@ -542,14 +771,14 @@ def main() -> None:
     if not available_platforms:
         raise RuntimeError(f"No platforms were discovered for framework {framework}.")
 
-    available_tools = discover_tools()
-    if not available_tools:
-        raise RuntimeError(f"No tools were discovered in {PLATFORMS_ROOT}.")
-
     instance_name = validate_instance_name(args.name or prompt_value("New instance name"))
     platform = (args.platform or prompt_platform(available_platforms)).strip().lower()
-    platform_tools = discover_tools_for_platform(platform, framework)
-    selected_tools = normalize_tools(args.tools, platform_tools) if args.tools else list(platform_tools)
+    platform_tools = [item["name"] for item in manifest_tools(platform, framework)]
+    selected_tools = validate_tool_selection(
+        normalize_tools(args.tools, platform_tools) if args.tools else default_tools_for_platform(platform, framework),
+        platform,
+        framework,
+    )
     detected_os, detected_terminal = detect_environment_values(platform, framework)
     if args.env_os or args.env_terminal:
         environment_text = render_environment(
