@@ -3,6 +3,7 @@ import math
 import os  # Kept here
 import re
 import time
+import argparse
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -48,7 +49,7 @@ SIMILAR_FAILURES_TOP_K = int(os.getenv("SIMILAR_FAILURES_TOP_K", "5"))
 print(EXP_DB_PATH)
 tokens_used = 0
 MEMORY_VALS: Dict[str, Any] = {}
-USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "True")).lower() in ("1", "true", "yes")
+USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "False")).lower() in ("1", "true", "yes")
 # =========================
 # ENV LOADERS
 # =========================
@@ -502,6 +503,15 @@ def trim_history(action_history: List[Dict[str, Any]], keep_last: int = 8) -> Li
     return action_history[-keep_last:]
 
 
+def model_tool_docs(tool_docs: str) -> str:
+    """Show tool slots as syntax, not literal payloads for the model to copy."""
+    return (
+        tool_docs.replace(":GOAL", ":<instruction>")
+        .replace(":COMMAND", ":<actual command>")
+        .replace(":TEXT", ":<actual text>")
+    )
+
+
 def build_system_prompt(
     goal: str,
     plan: List[str],
@@ -514,54 +524,29 @@ def build_system_prompt(
     tool_docs: str = TOOL_DOCS,
 ) -> str:
     architecture_profile = load_architecture_profile() or ARCHITECTURE_PROFILE
-    return f"""
-You are an autonomous agent.
-
-You MUST always respond in valid JSON.
+    return f"""You select one local action for this device. Never claim an action's result before a tool returns it.
 
 SYSTEM ENVIRONMENT:
 {ENVING}
 LOCAL ARCHITECTURE PROFILE:
 {safe_json(architecture_profile)}
-AVAILABLE_TOOLS:
-{tool_docs}
+TOOL CALL SYNTAX:
+{model_tool_docs(tool_docs)}
 
 GLOBAL GOAL:
 {goal}
 
-PLAN FRAMEWORK:
-{safe_json(plan)}
-
-COMPLETED STEPS:
-{safe_json(completed_steps)}
-
-RUNTIME STATE:
-{safe_json(state)}
-
 RECENT ACTION HISTORY:
 {safe_json(trim_history(action_history))}
 
-CORE EXECUTION RULES:
-- The PLAN FRAMEWORK is high-level guidance only.
-- Do NOT skip ahead.
-- Do NOT optimize by doing multiple future steps early.
-- Do NOT assume hidden memory. Use only GOAL, PLAN FRAMEWORK, MEMORY, STATE, and ACTION HISTORY.
-- If you need something remembered, use the memory tool syntax (example: memadd:some value).
-- If a STEP has a lot of actions, you SHOULD use the MEMORY TOOL to keep track of what you've done and what you know.
-- You CANNOT access memadd files trough shell commands, write it yourself.
-- Actions must be valid tool commands (example: "shell:cat secret", "memadd:123").
-- Treat the LOCAL ARCHITECTURE PROFILE as self-knowledge about your body, tools, observations, dependencies, and limits.
-- Never invent a capability that the profile and available tools do not support.
-- Treat profile entries under unavailable_actions as known architectural limits; do not probe tools merely to contradict them.
-- Respect explicit goal constraints that forbid a tool or observation method.
-- If the goal exceeds a declared or observed limit, report the specific limit and provenance instead of pretending to act.
-- Profile facts describe architecture and uncertainty; they do not grant permission or create a safety boundary.
-
-STRICT OUTPUT RULES:
-- Output ONLY valid JSON.
-- No markdown.
-- No explanation outside the requested JSON schema.
-- Be concise.
+COMMON RULES:
+- Return only valid JSON in the exact schema requested by the current task.
+- Use only listed tool syntax. Never output placeholders such as COMMAND, TEXT, GOAL, or tool:input.
+- Preserve literal identifiers and paths exactly. Perform only the current step.
+- Respect forbidden methods and known unavailable_actions; report a known limit instead of probing it.
+- Never invent capability, command output, hidden context, or completion.
+- Shell actions must be bounded and noninteractive. Never use `systemctl status`; use `systemctl show` or `systemctl is-active`.
+- Profile facts constrain capability; they do not grant permission.
 """
 
 
@@ -603,7 +588,7 @@ def formalize_goal(goal: str) -> str:
     Returns plain text only. This function MUST NOT produce JSON, plans,
     numbered steps, tool calls, or add information not implied by the goal.
     """
-    system = """
+    system = r"""
         You are a goal formalizer.
 
 Transform the user's goal into a clearer and more explicit version of the same goal.
@@ -730,31 +715,35 @@ Return ONLY:
 # PLAN
 # =========================
 def create_plan(goal: str, memory: str, state: Dict[str, Any]) -> List[str]:
-    system = build_system_prompt(
-        goal=goal,
-        plan=[],
-        current_step_index=0,
-        current_step="planning",
-        completed_steps=[],
-        memory=memory,
-        state=state,
-        action_history=[],
-    )
+    architecture_profile = load_architecture_profile() or ARCHITECTURE_PROFILE
+    system = f"""You are a local task planner, not an executor.
+
+GOAL:
+{goal}
+
+LOCAL ARCHITECTURE PROFILE:
+{safe_json(architecture_profile)}
+
+Return only valid JSON in the exact requested schema. Create the fewest high-level steps that preserve real
+dependencies. Do not write tool calls, shell commands, or results that do not yet exist. Preserve literal identifiers
+and paths exactly. Respect unavailable_actions and explicit method constraints.
+"""
 
     prompt = """
-Create a step-by-step plan framework for the GOAL.
+Create a minimal plan for the GOAL.
 
 Return ONLY:
 {
-  "steps": ["step 1", "step 2", "step 3"]
+  "steps": ["step 1"]
 }
 
 RULES:
 - Steps must be high-level descriptions.
 - Steps must NOT be tool calls.
-- 3 to 7 steps maximum.
+- 1 to 5 steps maximum.
 - Do NOT create subplans.
 - Do NOT execute anything.
+- Use one step when independent checks can be performed together in one bounded bulk action.
 - Do NOT include extra fields.
 """
     result = call_llm(prompt, system)
@@ -805,8 +794,7 @@ def decide_next_action(
 NOTE: The LAST EVALUATION is only for reference, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
 """
 
-    prompt = f"""
-Choose the SINGLE next executable action for the CURRENT STEP.
+    prompt = f"""Choose one executable action for the current step.
 
 {last_evaluation}
 CURRENT WORKING DIRECTORY:
@@ -822,12 +810,10 @@ Return ONLY:
 }}
 
 RULES:
-- Work ONLY on the CURRENT STEP.
-- Do NOT perform future steps early.
-- If CURRENT STEP is already complete, return status "done" and next_action "".
-- If blocked, return status "fail" and next_action "".
-- If continuing, return exactly one valid tool action in next_action.
-- PREFER actions that can be executed in BULK when using SHELL.
+- For work, use status "ongoing" and exactly tool:<actual input>, such as shell:hostname or return:known result.
+- Never copy documentation placeholders or wrap next_action in an object.
+- Prefer one bounded bulk action when safe.
+- If complete, return "done" with an empty action. If blocked, return "fail" with an empty action.
 """
     print(prompt)
     result = call_llm(prompt, system)
@@ -2100,8 +2086,14 @@ def run_agent(goal: str) -> None:
 # =========================
 if __name__ == "__main__":
     try:
-        run_agent( 
-            "Find the gateway of this network and then scan it and check if there are any known vaulnrabilites. if there are any. report them to me.")
+        parser = argparse.ArgumentParser(description="Run one Pigion watchdog goal.")
+        parser.add_argument("goal", nargs="*", help="Goal text for this watchdog.")
+        parser.add_argument("--goal", dest="goal_option", help="Goal text for this watchdog.")
+        args = parser.parse_args()
+        goal = args.goal_option or " ".join(args.goal).strip()
+        if not goal:
+            parser.error("provide a goal")
+        run_agent(goal)
     finally:
         try:
             client.close()

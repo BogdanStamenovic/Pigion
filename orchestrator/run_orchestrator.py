@@ -357,6 +357,15 @@ def trim_history(action_history: List[Dict[str, Any]], keep_last: int = 8) -> Li
     return action_history[-keep_last:]
 
 
+def model_tool_docs(tool_docs: str) -> str:
+    """Show tool slots as syntax, not literal payloads for the model to copy."""
+    return (
+        tool_docs.replace(":GOAL", ":<instruction>")
+        .replace(":COMMAND", ":<actual command>")
+        .replace(":TEXT", ":<actual text>")
+    )
+
+
 def build_system_prompt(
     goal: str,
     plan: List[str],
@@ -369,13 +378,10 @@ def build_system_prompt(
     tool_docs: str = TOOL_DOCS,
 ) -> str:
     device_profiles = load_device_profiles()
-    return f"""
-You are the Pigion orchestrator.
+    return f"""You are the Pigion device router. Route work; never perform or claim a device's work.
 
-You MUST always respond in valid JSON.
-
-AVAILABLE_TOOLS:
-{tool_docs}
+REGISTERED DEVICE CALLS:
+{model_tool_docs(tool_docs)}
 
 REGISTERED DEVICE ARCHITECTURE PROFILES:
 {safe_json(device_profiles)}
@@ -383,56 +389,18 @@ REGISTERED DEVICE ARCHITECTURE PROFILES:
 GLOBAL GOAL:
 {goal}
 
-PLAN FRAMEWORK:
-{safe_json(plan)}
-
-COMPLETED STEPS:
-{safe_json(completed_steps)}
-
-RUNTIME STATE:
-{safe_json(state)}
-
-RECENT ACTION HISTORY:
+PRIOR DEVICE RESULTS:
 {safe_json(trim_history(action_history))}
 
-CORE EXECUTION RULES:
-- Your runtime job is to route the user's goal through registered device tools.
-- Registered device tools are listed in AVAILABLE_TOOLS.
-- Device tools are named by device name, for example device_Bogdan:GOAL.
-- Do not use UUIDs in model-visible tool calls. UUIDs are private to the generated tool implementation.
-- Do not do the device's work yourself.
-- Do not invent devices or tools that are not listed in AVAILABLE_TOOLS.
-- Route only capabilities supported by the selected device's architecture profile and available tool.
-- Treat unavailable actions, dependencies, privilege boundaries, physical constraints, known failures, and uncertainty as routing facts.
-- Treat unavailable_actions as known routing limits; do not dispatch a goal to a device merely to probe or contradict them.
-- If every registered device exceeds a known limit, report the exact limit and its provenance instead of routing anyway.
-- Profile facts are architectural self-knowledge, not permissions or a safety/approval layer.
-- If no suitable registered device tool exists, report that routing is blocked.
-- For each action, choose exactly one matching device tool and pass the needed goal or message as the tool input.
-- The expected internal reasoning is simple: "yea, I should call this device tool for this goal."
-- Registered devices do not share your context, memory, action history, plan, or information from other devices.
-- A registered device knows only the exact text you put after its tool name in the current action.
-- Treat yourself as the middle man between devices.
-- Device instructions must be self-contained and specific. Include the target device identity, the exact local task,
-  relevant paths/files/URLs/values, and any information learned from previous device outputs.
-- Do not send vague inherited wording such as "measure temperature" when the intended task is local to that device.
-  Say "measure the temperature of yourself/this device" or otherwise name the exact target.
-- Group work by device whenever possible. If one device can complete several independent parts locally, send one
-  complete self-contained goal to that device instead of bouncing between devices.
-- Preserve dependency order. If device B can do some local work now but later needs information from device A, route
-  B's independent work first, then A produces the needed information, then B receives a new explicit goal containing
-  that information.
-- If a goal requires communication between two or more devices, broker that communication yourself:
-  first ask device A for the needed information, wait for that result in action history, then include the relevant
-  information explicitly in the goal you send to device B.
-- Never assume device B knows what device A said unless you explicitly put that information in device B's goal.
-- Never tell one device to ask another device directly. Communicate through orchestrator actions.
-
-STRICT OUTPUT RULES:
-- Output ONLY valid JSON.
-- No markdown.
-- No explanation outside the requested JSON schema.
-- Be concise.
+COMMON RULES:
+- Return only valid JSON in the exact schema requested by the current task.
+- Use only registered device calls. Never use UUIDs or invent a device, capability, or result.
+- Preserve literal identifiers, paths, URLs, and values exactly.
+- Profile unavailable_actions are known limits: report them instead of probing or routing.
+- A device sees only the text after its call's first colon. Make that instruction self-contained.
+- For a handoff, copy the required prior result explicitly into the consuming device's instruction.
+- Never tell devices to contact each other. Group local work and preserve dependency order.
+- Profile facts constrain routing; they do not grant permission.
 """
 
 
@@ -580,16 +548,18 @@ For example. If the user says "Sort the files in this folder", you should NOT om
 # PLAN
 # =========================
 def create_plan(goal: str, memory: str, state: Dict[str, Any]) -> List[str]:
-    system = build_system_prompt(
-        goal=goal,
-        plan=[],
-        current_step_index=0,
-        current_step="planning",
-        completed_steps=[],
-        memory=memory,
-        state=state,
-        action_history=[],
-    )
+    system = f"""You are a device-routing planner, not an executor.
+
+GOAL:
+{goal}
+
+REGISTERED DEVICE ARCHITECTURE PROFILES:
+{safe_json(load_device_profiles())}
+
+Return only valid JSON in the exact requested schema. Describe which device should handle each contiguous block of
+work and any required handoff. Do not write tool calls, shell commands, UUIDs, or results that do not yet exist.
+Preserve literal device names, identifiers, paths, URLs, and values exactly. Treat unavailable_actions as known limits.
+"""
 
     prompt = """
 Create a routing plan for the GOAL.
@@ -605,6 +575,8 @@ RULES:
 - 1 to 3 steps maximum.
 - Do NOT create subplans.
 - Do NOT describe doing the device work yourself.
+- A device action returns its result to the orchestrator. Performing work and reporting its result are one step;
+  never create a separate "report the result" step for the same device call.
 - Prefer one step per contiguous block of work on the same device.
 - Group independent tasks for the same device into the same step when they can be completed without waiting for another device.
 - If a device has some work it can do before it later depends on another device, split that device's work into
@@ -664,8 +636,7 @@ def decide_next_action(
 NOTE: The LAST EVALUATION is only for reference, you MAY override that evaluation/decision if you believe it is incorrect or not applicable. If you override, explain why in the reason field.
 """
 
-    prompt = f"""
-Choose the SINGLE registered device tool to call for the CURRENT STEP.
+    prompt = f"""Choose one registered device call for the current step.
 
 {last_evaluation}
 CURRENT STEP:
@@ -679,25 +650,11 @@ Return ONLY:
 }}
 
 RULES:
-- Use only a device tool listed in AVAILABLE_TOOLS.
-- Tool names must use the registered device name, not a UUID.
-- Do not blindly pass the original user goal or full formalized goal if only part of it belongs to this device.
-- Write the device input as a self-contained instruction for the selected device only.
-- Include the exact device-local task, the intended target, relevant paths/files/URLs/values, success criteria, and
-  any constraints the device needs in order to finish without seeing your plan.
-- If the task is about the selected device itself, say that explicitly. Example: "measure the temperature of yourself
-  / this device" instead of "measure temperature".
-- If multiple remaining tasks can be done by this same device before another device is needed, combine them in this
-  one device goal.
-- If this is a cross-device handoff, pass only the current device's task plus all relevant information already gathered from previous device outputs.
-- Do not assume devices share context; include the transferred information explicitly in the next device's goal.
-- If the needed information is not yet available, call the device that has that information before calling the device that needs it.
-- If the selected device can do useful independent work before waiting for another device, send only that independent
-  work now and leave the dependency-bound continuation for a later action.
-- The correct routing thought is: yea, I should call this device tool.
-- If CURRENT STEP is already complete, return status "done" and next_action "".
-- If no device is registered or no listed device matches, return status "fail" and next_action "".
-- If continuing, return exactly one valid tool action in next_action.
+- For work, use status "ongoing" and exactly device_NAME:<complete instruction>.
+- Replace NAME and the instruction. Never output placeholders such as GOAL, DEVICE_NAME, or COMMAND.
+- Valid example: device_Arch:Inspect disk usage on yourself and return the result. Invalid: device_Arch:GOAL.
+- Include exact targets, constraints, success criteria, and any required prior-device result.
+- If complete, return "done" with an empty action. If blocked, return "fail" with an empty action.
 """
     print(prompt)
     result = call_llm(prompt, system)
