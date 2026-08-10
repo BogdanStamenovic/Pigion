@@ -49,7 +49,7 @@ The current repository is a working daily-use prototype with:
 
 - A FastAPI dashboard and JSON-backed device/job registry.
 - A local orchestrator worker that accepts goals from the webserver.
-- Independent Linux and Windows watchdog installation.
+- Independent Linux, macOS, and Windows watchdog installation.
 - Pluggable framework/runtime manifests with validated configuration questions.
 - Required, default, and optional tool policies with per-device selection.
 - Framework-owned install, verification, upgrade, and uninstall lifecycle scripts.
@@ -138,7 +138,7 @@ The orchestrator and framework watchdogs intentionally remain separate implement
 
 ## Quick Start
 
-Python 3 is required. The controller currently targets Linux/systemd for its repo-local services.
+Python 3 is required. The installer can provision it through Homebrew on macOS or through apt, pacman, dnf/yum, zypper, or apk on Linux.
 
 ```bash
 git clone <your-pigion-repository-url>
@@ -146,7 +146,7 @@ cd Pigion
 ./install.sh
 ```
 
-`install.sh` delegates to `setup.sh`. The setup creates `.venv`, installs `requirements.txt`, prepares configuration/state, and installs the web and orchestrator services where supported.
+`install.sh` delegates to `setup.sh`. The setup creates `.venv`, installs `requirements.txt`, prepares configuration/state, and installs the web and orchestrator as systemd services on Linux or user LaunchAgents on macOS. On Windows, run `setup.ps1` to install user Scheduled Tasks.
 
 The important controller settings are:
 
@@ -182,7 +182,7 @@ To remove the repo-local web and orchestrator services without deleting reposito
 ./uninstall.sh
 ```
 
-Windows `setup.ps1` can prepare a local Python environment, while registered Windows watchdogs use generated PowerShell installers and Scheduled Tasks.
+Windows `setup.ps1` prepares the local Python environment and registers the controller processes as Scheduled Tasks. Use `uninstall.ps1` to remove those tasks. The uninstall scripts keep repository data and the virtual environment.
 
 ## Registering a Watchdog
 
@@ -196,12 +196,12 @@ The dashboard registration workflow is:
    - `default`: initially selected but removable.
    - `optional`: available but initially disabled.
 5. For the Pigion framework, configure Gemini, OpenAI, or Ollama. Other frameworks can own their model configuration.
-6. Provide the target sudo password when Linux installation needs it.
-7. Register the device and run the generated Linux or Windows installer command on the target.
+6. Provide the target sudo password when Linux installation needs it. macOS and Windows watchdog installs are user-scoped.
+7. Register the device and run the generated Linux, macOS, or Windows installer command on the target.
 
 Registration does not update the Git checkout. It uses the framework definitions from the controller's currently deployed revision, creates only the selected tool package, records the manifest revision, and generates a device-specific installer.
 
-Linux devices are installed under `/opt/pigion/DEVICE_NAME` by default and run as a systemd service. Windows devices are installed under `%LOCALAPPDATA%\Pigion\DEVICE_NAME` by default and run through a user Scheduled Task. `PIGION_INSTALL_ROOT` overrides either location.
+Linux devices are installed under `/opt/pigion/DEVICE_NAME` by default and run as a systemd service. macOS devices are installed under `~/Library/Application Support/Pigion/DEVICE_NAME` and run as a user LaunchAgent. Windows devices are installed under `%LOCALAPPDATA%\Pigion\DEVICE_NAME` and run through a user Scheduled Task. `PIGION_INSTALL_ROOT` overrides the device location.
 
 Framework lifecycle scripts run during installation before the watchdog starts. These are trusted arbitrary repository scripts, not sandboxed plugins. A framework can therefore be as destructive as the watchdog it installs.
 
@@ -241,7 +241,7 @@ The stable client contract is intentionally small so different agent frameworks 
 
 ## Removing a Watchdog
 
-Removing a registered watchdog queues a special uninstall job. The watchdog launches its framework uninstall lifecycle, then its shared Linux or Windows cleanup script. The server removes registry state, queued work, generated packages, installer artifacts, and the orchestrator tool only after the device acknowledges the uninstall.
+Removing a registered watchdog queues a special uninstall job. The watchdog launches its framework uninstall lifecycle, then its shared Linux, macOS, or Windows cleanup script. The server removes registry state, queued work, generated packages, installer artifacts, and the orchestrator tool only after the device acknowledges the uninstall.
 
 If the device is offline, it remains registered with uninstall pending so it can receive that job later.
 

@@ -5,6 +5,7 @@ SERVICES=(
   pigion-orchestrator.service
   pigion-web.service
 )
+OS_NAME="$(uname -s)"
 
 run_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -14,9 +15,25 @@ run_sudo() {
   fi
 }
 
-if ! command -v systemctl >/dev/null 2>&1; then
-  echo "systemctl not found; nothing to uninstall."
+if [ "$OS_NAME" = "Darwin" ]; then
+  launch_dir="${HOME}/Library/LaunchAgents"
+  for label in com.pigion.orchestrator com.pigion.web; do
+    echo "Stopping and removing $label..."
+    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    rm -f "$launch_dir/$label.plist"
+  done
+  echo "Uninstalled Pigion webserver/orchestrator launch agents. Repository data was kept."
   exit 0
+fi
+
+if [ "$OS_NAME" != "Linux" ]; then
+  echo "Unsupported OS for uninstall.sh: $OS_NAME. On Windows run uninstall.ps1." >&2
+  exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemctl not found; no Pigion systemd services were removed." >&2
+  exit 1
 fi
 
 for service in "${SERVICES[@]}"; do

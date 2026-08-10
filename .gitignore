@@ -1,6 +1,10 @@
 # Default-deny new top-level content. Source additions belong in the server,
 # orchestrator, or platforms trees; maker.py is the repository helper/generator.
 /*
+!*.sh
+!*.md
+!*.ps1
+!*.txt
 !/.gitignore
 !/maker.py
 !/server/

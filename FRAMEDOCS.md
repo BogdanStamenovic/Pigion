@@ -198,7 +198,7 @@ python3 -m maker researcher --framework gpt_researcher --platform linux --framew
 
 Lifecycle scripts are trusted repository code, but paths must remain inside their runtime directory. Absolute paths, `..` traversal outside the runtime, missing scripts, unknown lifecycle phases, and unsupported manifests are rejected before registration. Supported phases are `install`, `verify`, `upgrade`, and `uninstall`.
 
-The generated Linux or Windows installer creates the shared Pigion venv and `.env` first, then runs `install` and `verify` before enabling the watchdog service. A non-zero exit aborts installation, so scripts must print an actionable error without printing credentials. `install`, `verify`, and `upgrade` must be safe to run repeatedly. Framework `uninstall` runs before the shared service and file cleanup when supplied.
+The generated Linux, macOS, or Windows installer creates the shared Pigion venv and `.env` first, then runs `install` and `verify` before enabling the watchdog service. A non-zero exit aborts installation, so scripts must print an actionable error without printing credentials. `install`, `verify`, and `upgrade` must be safe to run repeatedly. Framework `uninstall` runs before the shared service and file cleanup when supplied.
 
 Lifecycle scripts receive framework answers from `.env` plus:
 
@@ -211,11 +211,11 @@ PIGION_SERVER_URL
 PIGION_SELECTED_TOOLS
 PIGION_FRAMEWORK
 PIGION_RUNTIME
-PIGION_SERVICE_USER       # Linux
-PIGION_SERVICE_HOME       # Linux
+PIGION_SERVICE_USER       # Linux/macOS
+PIGION_SERVICE_HOME       # Linux/macOS
 ```
 
-Linux lifecycle files use Bash; Windows lifecycle files use PowerShell. The manifest may point to arbitrary scripts, but registration users cannot provide or override those paths.
+Linux and macOS lifecycle files use Bash; Windows lifecycle files use PowerShell. A macOS manifest may declare `"source_runtime": "linux"` to reuse validated Unix tool and lifecycle sources without copying them. The source runtime must be inside the same framework. The manifest may point to arbitrary scripts, but registration users cannot provide or override those paths.
 
 ## Tool Documentation Contract
 

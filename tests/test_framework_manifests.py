@@ -76,6 +76,10 @@ class FrameworkManifestTests(unittest.TestCase):
         with self.assertRaises(maker.FrameworkManifestError):
             self.validate(lambda manifest: manifest.update(supported_os=["windows"]))
 
+    def test_invalid_source_runtime_rejected(self):
+        with self.assertRaises(maker.FrameworkManifestError):
+            self.validate(lambda manifest: manifest.update(source_runtime="../windows"))
+
     def test_invalid_question_rejected(self):
         with self.assertRaises(maker.FrameworkManifestError):
             self.validate(lambda manifest: manifest.update(questions=[{"name": "bad-name"}]))
@@ -141,10 +145,11 @@ class RepositoryManifestTests(unittest.TestCase):
         valid, invalid = maker.valid_framework_runtimes()
         self.assertFalse(invalid)
         self.assertIn(("pigion", "linux"), valid)
+        self.assertIn(("pigion", "macos"), valid)
         self.assertIn(("gpt_researcher", "windows"), valid)
 
     def test_pigion_defaults_to_all_manifest_tools(self):
-        for runtime in ("linux", "windows"):
+        for runtime in ("linux", "macos", "windows"):
             manifest = maker.validated_framework_manifest(runtime, "pigion")
             self.assertEqual(
                 maker.default_tools_for_platform(runtime, "pigion"),
@@ -152,8 +157,14 @@ class RepositoryManifestTests(unittest.TestCase):
             )
 
     def test_gpt_researcher_requires_research(self):
-        for runtime in ("linux", "windows"):
+        for runtime in ("linux", "macos", "windows"):
             self.assertEqual(maker.validate_tool_selection([], runtime, "gpt_researcher"), ["research"])
+
+    def test_macos_reuses_declared_unix_sources(self):
+        for framework in ("pigion", "gpt_researcher"):
+            manifest = maker.validated_framework_manifest("macos", framework)
+            self.assertEqual(manifest["source_runtime"], "linux")
+            self.assertEqual(manifest["supported_os"], ["macos"])
 
     def test_pigion_subset_generates_only_selected_tools(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -170,6 +181,19 @@ class RepositoryManifestTests(unittest.TestCase):
                 profile = json.loads((generated / "exp" / "architecture_profile.json").read_text())
                 self.assertEqual(profile["device"]["selected_tools"], ["shell", "return"])
                 self.assertTrue(profile["known_failure_modes"])
+
+    def test_macos_instance_copies_tools_from_source_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(maker, "PROJECT_ROOT", Path(temporary)):
+                maker.create_instance(
+                    "mac_agent", "macos", ["shell", "return"], framework="pigion",
+                    environment_text="OS: macOS\nTERMINAL: zsh\n",
+                )
+                generated = Path(temporary) / "mac_agent"
+                self.assertTrue((generated / "tools" / "shell.py").is_file())
+                self.assertTrue((generated / "tools" / "return_value.py").is_file())
+                manifest = json.loads((generated / "exp" / "framework_manifest.json").read_text())
+                self.assertEqual(manifest["source_runtime"], "linux")
 
 
 if __name__ == "__main__":

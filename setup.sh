@@ -7,28 +7,60 @@ cd "$SCRIPT_DIR"
 # Setup script: installs requirements and creates a .env with API_KEY
 # Usage: ./setup.sh
 
-# Check for python3
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required but not found. Please install Python 3." >&2
-  exit 1
-fi
-
-PY=python3
-APP_DIR="$(pwd)"
-APP_USER="${PIGION_APP_USER:-${SUDO_USER:-$USER}}"
-APP_GROUP="$(id -gn "$APP_USER")"
-APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
-if [ -z "$APP_HOME" ]; then
-  APP_HOME="$(eval echo "~$APP_USER")"
-fi
+OS_NAME="$(uname -s)"
 
 run_sudo() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
   else
+    command -v sudo >/dev/null 2>&1 || {
+      echo "sudo is required to install system packages or system services." >&2
+      return 1
+    }
     sudo "$@"
   fi
 }
+
+install_python() {
+  echo "Python 3 is missing; installing it with the detected package manager..."
+  if [ "$OS_NAME" = "Darwin" ]; then
+    command -v brew >/dev/null 2>&1 || {
+      echo "Install Homebrew from https://brew.sh or install Python 3 manually, then rerun setup." >&2
+      exit 1
+    }
+    brew install python
+  elif command -v apt-get >/dev/null 2>&1; then
+    run_sudo apt-get update
+    run_sudo apt-get install -y python3 python3-pip python3-venv
+  elif command -v pacman >/dev/null 2>&1; then
+    run_sudo pacman -S --needed --noconfirm python python-pip
+  elif command -v dnf >/dev/null 2>&1; then
+    run_sudo dnf install -y python3 python3-pip
+  elif command -v yum >/dev/null 2>&1; then
+    run_sudo yum install -y python3 python3-pip
+  elif command -v zypper >/dev/null 2>&1; then
+    run_sudo zypper --non-interactive install python3 python3-pip
+  elif command -v apk >/dev/null 2>&1; then
+    run_sudo apk add python3 py3-pip
+  else
+    echo "No supported package manager found. Install Python 3, pip, and venv support, then rerun setup." >&2
+    exit 1
+  fi
+}
+
+command -v python3 >/dev/null 2>&1 || install_python
+
+PY=python3
+APP_DIR="$(pwd)"
+APP_USER="${PIGION_APP_USER:-${SUDO_USER:-$USER}}"
+APP_GROUP="$(id -gn "$APP_USER")"
+APP_HOME=""
+if command -v getent >/dev/null 2>&1; then
+  APP_HOME="$(getent passwd "$APP_USER" | cut -d: -f6)"
+fi
+if [ -z "$APP_HOME" ]; then
+  APP_HOME="$(eval echo "~$APP_USER")"
+fi
 
 repair_app_ownership() {
   local paths=()
@@ -203,9 +235,103 @@ EOF
   echo "Webserver should be reachable at: $server_url/login"
 }
 
+xml_escape() {
+  "$PY" -c 'import html, sys; print(html.escape(sys.argv[1], quote=True))' "$1"
+}
+
+install_launchd_services() {
+  local web_host="${PIGION_WEB_HOST:-0.0.0.0}"
+  local web_port="${PIGION_WEB_PORT:-8000}"
+  local public_host="${PIGION_PUBLIC_HOST:-$(detect_public_host)}"
+  local server_url="${PIGION_SERVER_URL:-http://${public_host}:${web_port}}"
+  local service_python="$APP_DIR/.venv/bin/python"
+  [ -x "$service_python" ] || service_python="$(command -v "$PY")"
+
+  upsert_env "PIGION_SERVER_URL" "$server_url"
+  upsert_env "PIGION_WEB_HOST" "$web_host"
+  upsert_env "PIGION_WEB_PORT" "$web_port"
+  update_server_config_url "$server_url"
+  repair_app_ownership
+
+  local launch_dir="$APP_HOME/Library/LaunchAgents"
+  local log_dir="$APP_DIR/.pigion-services"
+  mkdir -p "$launch_dir" "$log_dir"
+  cat > "$log_dir/web.sh" <<EOF
+#!/usr/bin/env bash
+set -a
+. $(printf '%q' "$APP_DIR/.env")
+set +a
+cd $(printf '%q' "$APP_DIR")
+exec $(printf '%q' "$service_python") -m uvicorn server.server:app --host $(printf '%q' "$web_host") --port $(printf '%q' "$web_port")
+EOF
+  cat > "$log_dir/orchestrator.sh" <<EOF
+#!/usr/bin/env bash
+set -a
+. $(printf '%q' "$APP_DIR/.env")
+set +a
+cd $(printf '%q' "$APP_DIR")
+exec $(printf '%q' "$service_python") -m server.orchestrator_client --server $(printf '%q' "$server_url") --python $(printf '%q' "$service_python") --project-root $(printf '%q' "$APP_DIR")
+EOF
+  chmod 0700 "$log_dir/web.sh" "$log_dir/orchestrator.sh"
+
+  local app_dir_xml web_script_xml orchestrator_script_xml
+  app_dir_xml="$(xml_escape "$APP_DIR")"
+  web_script_xml="$(xml_escape "$log_dir/web.sh")"
+  orchestrator_script_xml="$(xml_escape "$log_dir/orchestrator.sh")"
+
+  cat > "$launch_dir/com.pigion.web.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.pigion.web</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$web_script_xml</string></array>
+<key>WorkingDirectory</key><string>$app_dir_xml</string>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>$(xml_escape "$APP_HOME")</string><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>$app_dir_xml/.pigion-services/web.log</string>
+<key>StandardErrorPath</key><string>$app_dir_xml/.pigion-services/web.err.log</string>
+</dict></plist>
+EOF
+
+  cat > "$launch_dir/com.pigion.orchestrator.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.pigion.orchestrator</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>$orchestrator_script_xml</string></array>
+<key>WorkingDirectory</key><string>$app_dir_xml</string>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>$(xml_escape "$APP_HOME")</string><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>$app_dir_xml/.pigion-services/orchestrator.log</string>
+<key>StandardErrorPath</key><string>$app_dir_xml/.pigion-services/orchestrator.err.log</string>
+</dict></plist>
+EOF
+
+  launchctl bootout "gui/$(id -u "$APP_USER")/com.pigion.web" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$(id -u "$APP_USER")/com.pigion.orchestrator" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u "$APP_USER")" "$launch_dir/com.pigion.web.plist"
+  launchctl bootstrap "gui/$(id -u "$APP_USER")" "$launch_dir/com.pigion.orchestrator.plist"
+  echo "Installed launchd agents: com.pigion.web, com.pigion.orchestrator"
+  echo "Webserver should be reachable at: $server_url/login"
+}
+
+install_services() {
+  if [ "$OS_NAME" = "Darwin" ]; then
+    install_launchd_services
+  elif [ "$OS_NAME" = "Linux" ]; then
+    install_systemd_services
+  else
+    echo "Unsupported OS for setup.sh: $OS_NAME. On Windows run setup.ps1." >&2
+    exit 1
+  fi
+}
+
 # Check for pip
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
-  echo "pip for python3 is required but not found. Try: python3 -m ensurepip --upgrade or install pip." >&2
+  "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || install_python
+fi
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  echo "pip for python3 is still unavailable after dependency installation." >&2
   exit 1
 fi
 
@@ -216,7 +342,11 @@ CREATE_VENV=${CREATE_VENV:-Y}
 if [[ "$CREATE_VENV" =~ ^[Yy] ]]; then
   if [ ! -d ".venv" ]; then
     echo "Creating virtual environment in .venv..."
-    "$PY" -m venv .venv
+    if ! "$PY" -m venv .venv; then
+      rm -rf .venv
+      install_python
+      "$PY" -m venv .venv
+    fi
   else
     echo "Using existing .venv virtual environment."
   fi
@@ -297,4 +427,4 @@ if [[ "$CREATE_VENV" =~ ^[Yy] ]]; then
   echo "To activate the virtualenv: source .venv/bin/activate"
 fi
 
-install_systemd_services
+install_services

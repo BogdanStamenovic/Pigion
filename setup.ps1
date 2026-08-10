@@ -1,17 +1,31 @@
 # PowerShell setup script: installs requirements and creates a .env with API_KEY and ABS_PATH
 # Usage: .\setup.ps1
 
-# Check for Python
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+$ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $ScriptDir
+
+# Find Python (the official Windows installer commonly exposes only py.exe).
+$pythonCommand = $null
+foreach ($candidate in @("py", "python", "python3")) {
+    if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+        $pythonCommand = $candidate
+        break
+    }
+}
+if (-not $pythonCommand) {
     Write-Error "Python is required but not found. Please install Python 3."
     exit 1
 }
 
 # Check for pip
-$pipCheck = python -m pip --version 2>$null
+$pipCheck = & $pythonCommand -m pip --version 2>$null
 if (-not $pipCheck) {
-    Write-Error "pip for python is required but not found. Try: python -m ensurepip --upgrade or install pip."
-    exit 1
+    & $pythonCommand -m ensurepip --upgrade
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "pip for Python is required but could not be installed with ensurepip."
+        exit 1
+    }
 }
 
 # Ask whether to create a virtualenv and install there (default: yes)
@@ -19,29 +33,23 @@ $createVenv = Read-Host "Create a virtualenv in .venv and install requirements t
 if ([string]::IsNullOrWhiteSpace($createVenv) -or $createVenv -match '^[Yy]') {
     if (-not (Test-Path ".venv")) {
         Write-Host "Creating virtual environment in .venv..."
-        python -m venv .venv
+        & $pythonCommand -m venv .venv
+        if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed" }
     } else {
         Write-Host "Using existing .venv virtual environment."
     }
-    $venvActivate = ".venv/Scripts/Activate.ps1"
-    if (Test-Path $venvActivate) {
-        & $venvActivate
-    }
-    $pipCmd = "pip"
+    $installPython = (Resolve-Path ".venv\Scripts\python.exe").Path
 } else {
-    $pipCmd = "python -m pip"
+    $installPython = $pythonCommand
 }
 
 # Install requirements if requirements.txt exists
 if (Test-Path "requirements.txt") {
     Write-Host "Installing requirements from requirements.txt..."
-    if ($pipCmd -eq "pip") {
-        pip install --upgrade pip
-        pip install -r requirements.txt
-    } else {
-        python -m pip install --upgrade pip
-        python -m pip install -r requirements.txt
-    }
+    & $installPython -m pip install --upgrade pip
+    if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
+    & $installPython -m pip install -r requirements.txt
+    if ($LASTEXITCODE -ne 0) { throw "requirements installation failed" }
 } else {
     Write-Host "No requirements.txt found in the current directory. Skipping pip install."
 }
@@ -94,3 +102,39 @@ Write-Host "Done. .env created/updated."
 if ([string]::IsNullOrWhiteSpace($createVenv) -or $createVenv -match '^[Yy]') {
     Write-Host "To activate the virtualenv: .venv\\Scripts\\Activate.ps1"
 }
+
+$pythonExe = if (Test-Path ".venv\Scripts\python.exe") { (Resolve-Path ".venv\Scripts\python.exe").Path } else { (Get-Command $pythonCommand).Source }
+$serviceDir = Join-Path $ScriptDir ".pigion-services"
+New-Item -ItemType Directory -Force -Path $serviceDir | Out-Null
+
+$webScript = @"
+`$ErrorActionPreference = "Continue"
+Set-Location '$($ScriptDir.Replace("'", "''"))'
+Get-Content '.env' | ForEach-Object { if (`$_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { [Environment]::SetEnvironmentVariable(`$Matches[1], `$Matches[2].Trim('"'), 'Process') } }
+while (`$true) {
+    & '$($pythonExe.Replace("'", "''"))' -m uvicorn server.server:app --host 0.0.0.0 --port 8000
+    Start-Sleep -Seconds 5
+}
+"@
+$orchestratorScript = @"
+`$ErrorActionPreference = "Continue"
+Set-Location '$($ScriptDir.Replace("'", "''"))'
+Get-Content '.env' | ForEach-Object { if (`$_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { [Environment]::SetEnvironmentVariable(`$Matches[1], `$Matches[2].Trim('"'), 'Process') } }
+while (`$true) {
+    & '$($pythonExe.Replace("'", "''"))' -m server.orchestrator_client --server 'http://127.0.0.1:8000' --python '$($pythonExe.Replace("'", "''"))' --project-root '$($ScriptDir.Replace("'", "''"))'
+    Start-Sleep -Seconds 5
+}
+"@
+Write-LinesUtf8NoBom (Join-Path $serviceDir "web.ps1") @($webScript)
+Write-LinesUtf8NoBom (Join-Path $serviceDir "orchestrator.ps1") @($orchestratorScript)
+
+foreach ($task in @(
+    @{ Name = "Pigion_Web"; Script = (Join-Path $serviceDir "web.ps1") },
+    @{ Name = "Pigion_Orchestrator"; Script = (Join-Path $serviceDir "orchestrator.ps1") }
+)) {
+    $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$($task.Script)`""
+    schtasks.exe /Create /TN $task.Name /TR $action /SC ONLOGON /F | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Failed to register scheduled task $($task.Name)" }
+    schtasks.exe /Run /TN $task.Name | Out-Host
+}
+Write-Host "Installed and started Scheduled Tasks: Pigion_Web, Pigion_Orchestrator"

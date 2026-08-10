@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "framework": "gpt_researcher",
+  "runtime": "macos",
+  "source_runtime": "linux",
+  "display_name": "GPT Researcher",
+  "description": "macOS research watchdog wrapper using GPT Researcher.",
+  "supported_os": ["macos"],
+  "runner": "../core/whatchdog.py",
+  "allow_zero_tools": false,
+  "uses_pigion_model_config": false,
+  "architecture_profile": {
+    "summary": "macOS deep-research wrapper; it researches topics but is not a general device-control agent.",
+    "capabilities": ["Produce source-backed research reports using the configured research stack."],
+    "unavailable_actions": ["Cannot perform arbitrary shell, filesystem, device-control, or physical actions."],
+    "observable_state": ["Observes public or reachable web content returned by its configured research stack."],
+    "required_dependencies": ["Requires Ollama, an embedding model, SearXNG, browser support, and the selected extraction engine."],
+    "privilege_boundaries": ["Uses only the permissions of its launchd user and configured network services."],
+    "physical_constraints": ["Has no physical sensors or actuators."],
+    "known_failure_modes": ["Research quality degrades when search, model, browser, or extraction dependencies are unavailable."],
+    "uncertainty": ["Cannot guarantee source completeness, freshness, accessibility, or factual correctness."]
+  },
+  "tools": [
+    {"name":"research","module":"research.py","policy":"required","documentation":"Research, Description: Runs a GPT Researcher deep-research task, Command - research:TOPIC, Example - research:Compare local-first AI research stacks"}
+  ],
+  "questions": [
+    {"name":"GPT_RESEARCHER_LLM_MODEL","label":"Ollama LLM model","default":"llama3.1","required":true},
+    {"name":"GPT_RESEARCHER_OLLAMA_BASE_URL","label":"Ollama base URL","default":"http://127.0.0.1:11434","required":true},
+    {"name":"GPT_RESEARCHER_EMBEDDING_MODEL","label":"Embedding model","default":"nomic-embed-text","required":true},
+    {"name":"GPT_RESEARCHER_SEARXNG_URL","label":"SearXNG URL","default":"http://127.0.0.1:8080","required":true},
+    {"name":"GPT_RESEARCHER_BROWSER","label":"Browser","default":"playwright","options":["playwright"],"required":true},
+    {"name":"GPT_RESEARCHER_EXTRACTION","label":"Extraction engine","default":"trafilatura","options":["trafilatura","crawl4ai"],"required":true},
+    {"name":"GPT_RESEARCHER_QDRANT_URL","label":"Qdrant URL","default":"","required":false},
+    {"name":"GPT_RESEARCHER_REPORT_TYPE","label":"Default report type","default":"research_report","options":["research_report","resource_report","outline_report","custom_report"],"required":true}
+  ],
+  "lifecycle": {"install":"lifecycle/install.sh","verify":"lifecycle/verify.sh"}
+}

@@ -271,7 +271,7 @@ def discover_platforms(framework: str | None = None) -> list[str]:
     return sorted(
         path.name
         for path in framework_dir.iterdir()
-        if path.is_dir() and (path / "tools").is_dir()
+        if path.is_dir() and ((path / "tools").is_dir() or (path / "framework.json").is_file())
     )
 
 
@@ -350,11 +350,22 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
     supported_os = manifest.get("supported_os")
     if not isinstance(supported_os, list) or not supported_os or not all(isinstance(x, str) and x for x in supported_os):
         raise FrameworkManifestError("supported_os must be a non-empty list of strings.")
-    installer_os = "windows" if platform in {"windows", "win", "win32"} else "linux"
+    installer_os = (
+        "windows" if platform in {"windows", "win", "win32"}
+        else "macos" if platform in {"macos", "darwin", "osx"}
+        else "linux"
+    )
     if installer_os not in {item.strip().lower() for item in supported_os}:
         raise FrameworkManifestError(
             f"Runtime {platform!r} uses the {installer_os} installer but supported_os does not include {installer_os!r}."
         )
+    source_runtime = str(manifest.get("source_runtime") or platform).strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", source_runtime):
+        raise FrameworkManifestError("source_runtime must name another runtime in the same framework.")
+    source_runtime_root = platform_root(source_runtime, framework)
+    if not source_runtime_root.is_dir():
+        raise FrameworkManifestError(f"source_runtime does not exist: {source_runtime!r}.")
+
     runner = str(manifest.get("runner") or "../core/whatchdog.py")
     runner_relative = Path(runner)
     runner_path = (runtime_root / runner_relative).resolve()
@@ -377,7 +388,7 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
         if policy not in TOOL_POLICIES:
             raise FrameworkManifestError(f"Tool {name!r} has invalid policy {policy!r}.")
         module = str(item.get("module") or TOOL_MODULE_NAMES.get(name, f"{name}.py"))
-        _safe_runtime_file(runtime_root, f"tools/{module}", f"tool {name}")
+        _safe_runtime_file(source_runtime_root, f"tools/{module}", f"tool {name}")
         documentation = str(item.get("documentation") or "").strip()
         if not documentation or extract_tool_name_from_doc(documentation) != name:
             raise FrameworkManifestError(f"Tool {name!r} needs documentation with Command - {name}:...")
@@ -423,22 +434,23 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
     for phase, script in lifecycle.items():
         if not isinstance(script, str) or not script:
             raise FrameworkManifestError(f"Lifecycle {phase!r} must be a script path.")
-        source = _safe_runtime_file(runtime_root, script, f"lifecycle {phase}")
-        normalized_lifecycle[phase] = str(source.relative_to(runtime_root))
+        source = _safe_runtime_file(source_runtime_root, script, f"lifecycle {phase}")
+        normalized_lifecycle[phase] = str(source.relative_to(source_runtime_root))
 
     raw = path.read_bytes()
     revision = hashlib.sha256(raw)
     revision.update(runner_path.read_bytes())
     for tool in normalized_tools:
         revision.update(tool["name"].encode("utf-8"))
-        revision.update(_safe_runtime_file(runtime_root, f"tools/{tool['module']}", f"tool {tool['name']}").read_bytes())
+        revision.update(_safe_runtime_file(source_runtime_root, f"tools/{tool['module']}", f"tool {tool['name']}").read_bytes())
     for phase, relative in sorted(normalized_lifecycle.items()):
         revision.update(phase.encode("utf-8"))
-        revision.update(_safe_runtime_file(runtime_root, relative, f"lifecycle {phase}").read_bytes())
+        revision.update(_safe_runtime_file(source_runtime_root, relative, f"lifecycle {phase}").read_bytes())
     return {
         **manifest,
         "framework": framework,
         "runtime": platform,
+        "source_runtime": source_runtime,
         "runner": runner,
         "tools": normalized_tools,
         "questions": questions,
@@ -682,7 +694,7 @@ def detect_environment_values(platform: str, framework: str | None = None) -> tu
         os_name = os.environ.get("OS", "Windows") if os.name == "nt" else os.uname().sysname
         return os_name, terminal
 
-    terminal = Path(os.environ.get("SHELL", "bash")).name
+    terminal = Path(os.environ.get("SHELL", "zsh" if platform == "macos" else "bash")).name
     if os.name == "nt":
         os_name = "Linux/Raspberry Pi"
     else:
@@ -783,8 +795,9 @@ def copy_tools(
     target_tools_dir: Path,
     framework: str | None = None,
 ) -> None:
-    source_tools_dir = platform_tools_dir(platform, framework)
-    modules = {item["name"]: item["module"] for item in manifest_tools(platform, framework)}
+    manifest = validated_framework_manifest(platform, framework)
+    source_tools_dir = platform_tools_dir(manifest["source_runtime"], framework)
+    modules = {item["name"]: item["module"] for item in manifest["tools"]}
     for tool in selected_tools:
         module_name = modules[tool]
         source = source_tools_dir / module_name
@@ -798,7 +811,7 @@ def copy_tools(
 
 def copy_lifecycle(platform: str, target_dir: Path, framework: str | None = None) -> dict[str, str]:
     manifest = validated_framework_manifest(platform, framework)
-    runtime_root = platform_root(platform, framework)
+    runtime_root = platform_root(manifest["source_runtime"], framework)
     lifecycle_dir = target_dir / "lifecycle"
     copied: dict[str, str] = {}
     for phase, relative in manifest["lifecycle"].items():

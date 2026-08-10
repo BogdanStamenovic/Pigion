@@ -314,6 +314,9 @@ def remove_local_install(device: dict[str, Any]) -> list[str]:
     device_name = str(device.get("name", "")).strip()
     if not device_name:
         return messages
+    platform = str(device.get("platform", "linux")).strip().lower()
+    if platform in {"windows", "win", "win32", "macos", "darwin", "osx"}:
+        return messages
 
     sudo_password = cleanup_sudo_password()
     service_name = f"pigion_{device_name}.service"
@@ -471,6 +474,10 @@ def server_url() -> str:
 
 def is_windows_platform(platform: str | None) -> bool:
     return str(platform or "").strip().lower() in {"windows", "win32", "win"}
+
+
+def is_macos_platform(platform: str | None) -> bool:
+    return str(platform or "").strip().lower() in {"macos", "darwin", "osx"}
 
 
 def install_command(device_uuid: str, platform: str | None = None) -> str:
@@ -859,21 +866,41 @@ def write_install_script(device: dict[str, Any]) -> str:
           fi
         }}
 
-        command -v curl >/dev/null 2>&1 || {{ echo "curl is required"; exit 1; }}
-        command -v "$PYTHON_BIN" >/dev/null 2>&1 || {{ echo "$PYTHON_BIN is required"; exit 1; }}
-
-        if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
+        install_prerequisites() {{
           if command -v apt-get >/dev/null 2>&1; then
             run_sudo apt-get update
-            run_sudo apt-get install -y python3-venv
+            run_sudo apt-get install -y curl tar python3 python3-pip python3-venv
+          elif command -v pacman >/dev/null 2>&1; then
+            run_sudo pacman -S --needed --noconfirm curl tar python python-pip
+          elif command -v dnf >/dev/null 2>&1; then
+            run_sudo dnf install -y curl tar python3 python3-pip
+          elif command -v yum >/dev/null 2>&1; then
+            run_sudo yum install -y curl tar python3 python3-pip
+          elif command -v zypper >/dev/null 2>&1; then
+            run_sudo zypper --non-interactive install curl tar python3 python3-pip
+          elif command -v apk >/dev/null 2>&1; then
+            run_sudo apk add curl tar python3 py3-pip
           else
-            echo "python venv support is required. Install python3-venv for your OS."
+            echo "No supported package manager found. Install curl, tar, Python 3, pip, and venv support." >&2
             exit 1
           fi
+        }}
+
+        command -v systemctl >/dev/null 2>&1 || {{ echo "This Linux installer requires systemd; systemctl was not found." >&2; exit 1; }}
+        [ "$(ps -p 1 -o comm= 2>/dev/null)" = "systemd" ] || {{ echo "This Linux installer requires systemd as PID 1." >&2; exit 1; }}
+        if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 || ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+          install_prerequisites
         fi
 
         TMP_DIR="$(mktemp -d)"
         trap 'rm -rf "$TMP_DIR"' EXIT
+
+        if ! "$PYTHON_BIN" -m venv "$TMP_DIR/venv-check" >/dev/null 2>&1; then
+          install_prerequisites
+          rm -rf "$TMP_DIR/venv-check"
+          "$PYTHON_BIN" -m venv "$TMP_DIR/venv-check"
+        fi
+        rm -rf "$TMP_DIR/venv-check"
 
         curl -fsSL "$SERVER_URL/install/$DEVICE_UUID/bundle.tgz" -o "$TMP_DIR/pigion-watchdog.tgz"
         curl -fsSL "$SERVER_URL/install/$DEVICE_UUID/client.py" -o "$TMP_DIR/client.py"
@@ -1008,6 +1035,133 @@ EOF_UNINSTALL
         echo "Installed $SERVICE_NAME"
         echo "Status: systemctl status $SERVICE_NAME.service"
         """
+    ).lstrip().replace("\n        ", "\n")
+
+
+def write_macos_install_script(device: dict[str, Any]) -> str:
+    device_name = str(device["name"])
+    device_uuid = str(device["uuid"])
+    label = f"com.pigion.watchdog.{device_name}"
+    env_file_body = "\n".join(
+        shell_env_assignment(key, value) for key, value in sorted(device_env_values(device).items())
+    )
+    lifecycle = dict(device.get("lifecycle") or {})
+    install_phase = "install" in lifecycle
+    upgrade_phase = "upgrade" in lifecycle
+    verify_phase = "verify" in lifecycle
+    return textwrap.dedent(
+        f'''#!/usr/bin/env bash
+        set -euo pipefail
+
+        [ "$(uname -s)" = "Darwin" ] || {{ echo "This installer is for macOS." >&2; exit 1; }}
+        DEVICE_NAME={shlex.quote(device_name)}
+        DEVICE_UUID={shlex.quote(device_uuid)}
+        SERVER_URL={shlex.quote(server_url())}
+        LABEL={shlex.quote(label)}
+        INSTALL_ROOT="${{PIGION_INSTALL_ROOT:-$HOME/Library/Application Support/Pigion}}"
+        INSTALL_DIR="$INSTALL_ROOT/$DEVICE_NAME"
+        WAS_INSTALLED=0
+        [ -d "$INSTALL_DIR" ] && WAS_INSTALLED=1
+        PYTHON_BIN="${{PYTHON_BIN:-python3}}"
+        VENV_DIR="$INSTALL_DIR/.venv"
+        VENV_PYTHON="$VENV_DIR/bin/python"
+        LAUNCH_DIR="$HOME/Library/LaunchAgents"
+        PLIST="$LAUNCH_DIR/$LABEL.plist"
+
+        command -v curl >/dev/null 2>&1 || {{ echo "curl is required." >&2; exit 1; }}
+        if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+          if command -v brew >/dev/null 2>&1; then
+            brew install python
+          else
+            echo "Python 3 is required. Install it manually or install Homebrew first." >&2
+            exit 1
+          fi
+        fi
+
+        TMP_DIR="$(mktemp -d)"
+        trap 'rm -rf "$TMP_DIR"' EXIT
+        "$PYTHON_BIN" -m venv "$TMP_DIR/venv-check" || {{ echo "Python venv support is required." >&2; exit 1; }}
+        rm -rf "$TMP_DIR/venv-check"
+        curl -fsSL "$SERVER_URL/install/$DEVICE_UUID/bundle.tgz" -o "$TMP_DIR/pigion-watchdog.tgz"
+        curl -fsSL "$SERVER_URL/install/$DEVICE_UUID/client.py" -o "$TMP_DIR/client.py"
+
+        mkdir -p "$INSTALL_DIR" "$LAUNCH_DIR"
+        tar -xzf "$TMP_DIR/pigion-watchdog.tgz" -C "$INSTALL_DIR"
+        install -m 0644 "$TMP_DIR/client.py" "$INSTALL_DIR/client.py"
+        "$PYTHON_BIN" -m venv "$VENV_DIR"
+        "$VENV_PYTHON" -m pip install --upgrade pip
+        "$VENV_PYTHON" -m pip install -r "$INSTALL_DIR/requirements.txt"
+
+        cat > "$INSTALL_DIR/.env" <<'EOF_ENV'
+{env_file_body}
+EOF_ENV
+        "$PYTHON_BIN" - "$INSTALL_DIR/.env" "$INSTALL_DIR" <<'PY_ENV'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace("__PIGION_INSTALL_DIR__", sys.argv[2]), encoding="utf-8")
+PY_ENV
+        chmod 600 "$INSTALL_DIR/.env"
+
+        run_framework_phase() {{
+          local phase="$1"
+          local script="$INSTALL_DIR/$DEVICE_NAME/lifecycle/$phase.sh"
+          [ -f "$script" ] || return 0
+          env PIGION_INSTALL_DIR="$INSTALL_DIR" PIGION_VENV_PYTHON="$VENV_PYTHON" \
+            PIGION_DEVICE_NAME="$DEVICE_NAME" PIGION_DEVICE_UUID="$DEVICE_UUID" \
+            PIGION_SERVER_URL="$SERVER_URL" \
+            PIGION_SELECTED_TOOLS={shlex.quote(','.join(device.get('selected_tools', [])))} \
+            PIGION_FRAMEWORK={shlex.quote(str(device.get('framework', 'pigion')))} \
+            PIGION_RUNTIME=macos PIGION_SERVICE_USER="$(id -un)" PIGION_SERVICE_HOME="$HOME" \
+            /bin/bash -c 'set -a; . "$1"; set +a; exec /bin/bash "$2"' framework-lifecycle "$INSTALL_DIR/.env" "$script"
+        }}
+        if [ "$WAS_INSTALLED" -eq 1 ] && {"true" if upgrade_phase else "false"}; then
+          run_framework_phase upgrade
+        else
+          {"run_framework_phase install" if install_phase else ": # no framework install phase"}
+        fi
+        {"run_framework_phase verify" if verify_phase else ": # no framework verify phase"}
+
+        cat > "$INSTALL_DIR/uninstall.sh" <<'EOF_UNINSTALL'
+#!/usr/bin/env bash
+set -euo pipefail
+INSTALL_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+LABEL={shlex.quote(label)}
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+FRAMEWORK_UNINSTALL="$INSTALL_DIR/{e(device_name)}/lifecycle/uninstall.sh"
+if [ -f "$FRAMEWORK_UNINSTALL" ]; then
+  set -a; . "$INSTALL_DIR/.env"; set +a
+  PIGION_INSTALL_DIR="$INSTALL_DIR" /bin/bash "$FRAMEWORK_UNINSTALL"
+fi
+launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+rm -f "$PLIST"
+nohup /bin/bash -c 'sleep 2; rm -rf "$1"; rmdir "$(dirname "$1")" >/dev/null 2>&1 || true' cleanup "$INSTALL_DIR" >/dev/null 2>&1 &
+EOF_UNINSTALL
+        chmod 0755 "$INSTALL_DIR/uninstall.sh"
+
+        xml_escape() {{ "$PYTHON_BIN" -c 'import html,sys; print(html.escape(sys.argv[1], quote=True))' "$1"; }}
+        install_xml="$(xml_escape "$INSTALL_DIR")"
+        python_xml="$(xml_escape "$VENV_PYTHON")"
+        home_xml="$(xml_escape "$HOME")"
+        cat > "$PLIST" <<EOF_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$LABEL</string>
+<key>ProgramArguments</key><array><string>$python_xml</string><string>$install_xml/client.py</string></array>
+<key>WorkingDirectory</key><string>$install_xml</string>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>$home_xml</string><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>StandardOutPath</key><string>$install_xml/watchdog.log</string>
+<key>StandardErrorPath</key><string>$install_xml/watchdog.err.log</string>
+</dict></plist>
+EOF_PLIST
+        launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+        launchctl bootstrap "gui/$(id -u)" "$PLIST"
+        echo "Installed $LABEL"
+        echo "Install dir: $INSTALL_DIR"
+        echo "Status: launchctl print gui/$(id -u)/$LABEL"
+        '''
     ).lstrip().replace("\n        ", "\n")
 
 
@@ -1524,7 +1678,12 @@ async def register(request: Request) -> str:
         "runner_module": runner_module,
         "installer_path": str(installer_path),
     }
-    installer_text = write_windows_install_script(device) if is_windows_platform(platform) else write_install_script(device)
+    if is_windows_platform(platform):
+        installer_text = write_windows_install_script(device)
+    elif is_macos_platform(platform):
+        installer_text = write_macos_install_script(device)
+    else:
+        installer_text = write_install_script(device)
     installer_path.write_text(installer_text, encoding="utf-8")
     installer_path.chmod(0o755)
     device["installer_command"] = install_command(device_uuid, platform)
@@ -1721,7 +1880,8 @@ def installer(filename: str) -> str:
 
 @app.get("/install/{device_uuid}.sh", response_class=PlainTextResponse)
 def generated_install_script(device_uuid: str) -> str:
-    return write_install_script(get_device_or_404(device_uuid))
+    device = get_device_or_404(device_uuid)
+    return write_macos_install_script(device) if is_macos_platform(device.get("platform")) else write_install_script(device)
 
 
 @app.get("/install/{device_uuid}.ps1", response_class=PlainTextResponse)
