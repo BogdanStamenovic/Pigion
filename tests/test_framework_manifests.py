@@ -48,6 +48,7 @@ class FrameworkManifestTests(unittest.TestCase):
     def test_valid_manifest_and_required_tool(self):
         manifest = self.validate()
         self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["architecture_profile"]["capabilities"], [])
         temporary, root = self.make_registry()
         self.addCleanup(temporary.cleanup)
         with patch.object(maker, "PLATFORMS_ROOT", root):
@@ -83,6 +84,57 @@ class FrameworkManifestTests(unittest.TestCase):
         with self.assertRaises(maker.FrameworkManifestError):
             self.validate(lambda manifest: manifest.update(questions=[{"name": "GOOD_NAME", "validation": {"pattern": "["}}]))
 
+    def test_architecture_profile_normalizes_provenance(self):
+        manifest = self.validate(
+            lambda value: value.update(
+                architecture_profile={
+                    "summary": "A demo device.",
+                    "capabilities": ["Run demos"],
+                    "known_failure_modes": [
+                        {
+                            "statement": "Demo can fail",
+                            "provenance": "observed",
+                            "source": "test run",
+                            "match_terms": ["Demo Failure"],
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertEqual(manifest["architecture_profile"]["capabilities"][0]["provenance"], "declared")
+        self.assertEqual(manifest["architecture_profile"]["known_failure_modes"][0]["source"], "test run")
+        self.assertEqual(manifest["architecture_profile"]["known_failure_modes"][0]["match_terms"], ["demo failure"])
+
+    def test_architecture_profile_rejects_invalid_provenance(self):
+        with self.assertRaises(maker.FrameworkManifestError):
+            self.validate(
+                lambda value: value.update(
+                    architecture_profile={
+                        "capabilities": [{"statement": "Run demos", "provenance": "guessed"}]
+                    }
+                )
+            )
+
+    def test_device_profile_merges_declared_overrides(self):
+        manifest = self.validate(
+            lambda value: value.update(architecture_profile={"capabilities": ["Run demos"]})
+        )
+        profile = maker.device_architecture_profile(
+            manifest,
+            device_name="demo_one",
+            device_os="Demo Linux",
+            device_terminal="bash",
+            selected_tools=["demo"],
+            overrides={"physical_constraints": ["Fixed in place"]},
+        )
+        self.assertEqual(profile["device"]["name"], "demo_one")
+        self.assertEqual(profile["capabilities"][0]["source"], "framework manifest")
+        self.assertEqual(profile["physical_constraints"][0]["source"], "device registration")
+        self.assertIn("Can: Run demos", maker.concise_architecture_profile(profile))
+        routed = maker.routing_architecture_profile(profile)
+        self.assertEqual(routed["capabilities"][0]["provenance"], "declared")
+        self.assertNotIn("terminal", routed["device"])
+
 
 class RepositoryManifestTests(unittest.TestCase):
     def test_all_repository_runtimes_are_valid(self):
@@ -115,6 +167,9 @@ class RepositoryManifestTests(unittest.TestCase):
                 self.assertTrue((generated / "tools" / "return_value.py").is_file())
                 self.assertFalse((generated / "tools" / "search.py").exists())
                 self.assertEqual((generated / "exp" / "tool_import.txt").read_text(), "shell return\n")
+                profile = json.loads((generated / "exp" / "architecture_profile.json").read_text())
+                self.assertEqual(profile["device"]["selected_tools"], ["shell", "return"])
+                self.assertTrue(profile["known_failure_modes"])
 
 
 if __name__ == "__main__":

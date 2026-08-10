@@ -94,8 +94,73 @@ def load_env(path: str = "exp/enving.txt", abs: str = ABS_PATH) -> str:
         return "No environment info provided."
 
 
+def load_architecture_profile(path: str = "exp/architecture_profile.json", abs_path: str = ABS_PATH) -> Dict[str, Any]:
+    try:
+        with open(os.path.join(abs_path, path), "r", encoding="utf-8") as f:
+            profile = json.load(f)
+        return profile if isinstance(profile, dict) else {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+
+
+def record_profile_observation(failure: Dict[str, Any], abs_path: str = ABS_PATH) -> None:
+    """Persist a bounded failure fact without copying possibly sensitive raw output."""
+    profile_path = os.path.join(abs_path, "exp/architecture_profile.json")
+    profile = load_architecture_profile(abs_path=abs_path)
+    if not profile:
+        return
+    failure_name = str(failure.get("name") or "generic_step_failure")
+    failed_action = str(failure.get("failed_action") or "")
+    tool = failed_action.partition(":")[0] or "agent"
+    statement = f"Observed {failure_name} while using {tool}."
+    entries = profile.setdefault("known_failure_modes", [])
+    if not isinstance(entries, list):
+        entries = []
+        profile["known_failure_modes"] = entries
+    if any(isinstance(item, dict) and item.get("statement") == statement for item in entries):
+        return
+    entries.append({
+        "statement": statement,
+        "provenance": "observed",
+        "source": "watchdog runtime recovery",
+        "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    del entries[:-50]
+    temporary_path = profile_path + ".tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(temporary_path, profile_path)
+    except OSError as exc:
+        print(f"Could not update architecture profile: {exc}")
+
+
+def matching_architecture_limit(goal: str, profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    profile = profile or load_architecture_profile()
+    normalized_goal = " ".join(goal.lower().split())
+    for fact in profile.get("unavailable_actions", []) if isinstance(profile, dict) else []:
+        if not isinstance(fact, dict):
+            continue
+        terms = fact.get("match_terms", [])
+        if isinstance(terms, list) and any(
+            " ".join(str(term).lower().split()) in normalized_goal for term in terms if str(term).strip()
+        ):
+            return fact
+    return None
+
+
+def architecture_limit_report(fact: Dict[str, Any]) -> str:
+    return (
+        "Request exceeds a known architecture limit: "
+        f"{fact.get('statement', 'unsupported action')} "
+        f"[provenance={fact.get('provenance', 'unknown')}; source={fact.get('source', 'unknown')}]"
+    )
+
+
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
+ARCHITECTURE_PROFILE = load_architecture_profile()
 TOOLS = tool_import(ABS_PATH)
 print(TOOL_DOCS, ENVING)
 
@@ -448,6 +513,7 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
+    architecture_profile = load_architecture_profile() or ARCHITECTURE_PROFILE
     return f"""
 You are an autonomous agent.
 
@@ -455,6 +521,8 @@ You MUST always respond in valid JSON.
 
 SYSTEM ENVIRONMENT:
 {ENVING}
+LOCAL ARCHITECTURE PROFILE:
+{safe_json(architecture_profile)}
 AVAILABLE_TOOLS:
 {tool_docs}
 
@@ -482,6 +550,12 @@ CORE EXECUTION RULES:
 - If a STEP has a lot of actions, you SHOULD use the MEMORY TOOL to keep track of what you've done and what you know.
 - You CANNOT access memadd files trough shell commands, write it yourself.
 - Actions must be valid tool commands (example: "shell:cat secret", "memadd:123").
+- Treat the LOCAL ARCHITECTURE PROFILE as self-knowledge about your body, tools, observations, dependencies, and limits.
+- Never invent a capability that the profile and available tools do not support.
+- Treat profile entries under unavailable_actions as known architectural limits; do not probe tools merely to contradict them.
+- Respect explicit goal constraints that forbid a tool or observation method.
+- If the goal exceeds a declared or observed limit, report the specific limit and provenance instead of pretending to act.
+- Profile facts describe architecture and uncertainty; they do not grant permission or create a safety boundary.
 
 STRICT OUTPUT RULES:
 - Output ONLY valid JSON.
@@ -1525,6 +1599,7 @@ def recover_from_failure(
         action_hint=action_hint,
     )
     state["pending_failure"] = pending_failure
+    record_profile_observation(pending_failure)
 
     similar_failures = exp_store.find_similar(
         name=str(pending_failure["name"]),
@@ -1655,6 +1730,12 @@ def run_agent(goal: str) -> None:
     global returned_output, tokens_used
     returned_output = ""
     tokens_used = 0
+
+    known_limit = matching_architecture_limit(goal)
+    if known_limit:
+        returned_output = architecture_limit_report(known_limit)
+        print(returned_output)
+        return returned_output
 
     exp_store = ExpStore(EXP_DB_PATH)
     memory = ""

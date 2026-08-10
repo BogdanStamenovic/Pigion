@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import io
+import json
 import os
 import re
 import secrets
@@ -21,14 +22,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 
 from maker import (
     FrameworkManifestError,
+    PROFILE_FIELDS,
+    concise_architecture_profile,
     create_instance,
+    device_architecture_profile,
     framework_env_questions,
     framework_metadata,
+    normalize_architecture_profile,
     valid_framework_runtimes,
     validate_tool_selection,
     validated_framework_manifest,
     render_tool_docs,
     render_environment,
+    routing_architecture_profile,
 )
 from server.web_store import (
     CONFIG_PATH,
@@ -53,6 +59,7 @@ from server.web_store import (
 
 
 app = FastAPI(title="Pigion Orchestrator")
+DEVICE_PROFILES_PATH = ORCHESTRATOR_ROOT / "exp" / "device_profiles.json"
 UNINSTALL_JOB_KIND = "uninstall"
 UNINSTALL_JOB_GOAL = "__pigion_uninstall__"
 
@@ -192,7 +199,8 @@ def update_orchestrator_tool(device: dict[str, Any]) -> None:
     current = td_path.read_text(encoding="utf-8") if td_path.exists() else ""
     lines = [line for line in current.splitlines() if f"Command - {command}:" not in line]
     status_text = "DEVICE IS DOWN" if device.get("is_down") else "ONLINE"
-    capability = " ".join(str(device.get("capability_block", "")).split())
+    profile_summary = concise_architecture_profile(device.get("architecture_profile"))
+    capability = " ".join(str(device.get("capability_block", "")).split()) or profile_summary
     doc = (
         f"{len(lines) + 1}.Device {device['name']} [{status_text}], "
         f"Description: {capability or 'Remote Pigion watchdog device'}, "
@@ -200,6 +208,17 @@ def update_orchestrator_tool(device: dict[str, Any]) -> None:
     )
     lines.append(doc)
     td_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    devices = read_json(DEVICES_PATH, {"devices": {}}).get("devices", {})
+    public_profiles = {
+        str(item.get("command") or item.get("name")): {
+            "name": item.get("name"),
+            "command": item.get("command"),
+            "online": not bool(item.get("is_down")),
+            "profile": routing_architecture_profile(item.get("architecture_profile")),
+        }
+        for item in devices.values()
+    }
+    write_json(DEVICE_PROFILES_PATH, {"devices": public_profiles})
 
 
 def remove_orchestrator_tool(device: dict[str, Any]) -> None:
@@ -491,6 +510,31 @@ def default_capability_block(framework: str, platform: str, selected_tools: list
     ).strip()
 
 
+def ensure_device_architecture_profile(device: dict[str, Any]) -> bool:
+    """Backfill profiles for devices registered before architecture awareness existed."""
+    if isinstance(device.get("architecture_profile"), dict):
+        return False
+    try:
+        manifest = validated_framework_manifest(str(device["platform"]), str(device.get("framework") or "pigion"))
+        profile = device_architecture_profile(
+            manifest,
+            device_name=str(device.get("name") or "unknown"),
+            device_os=str(device.get("device_os") or "unknown"),
+            device_terminal=str(device.get("device_terminal") or "unknown"),
+            selected_tools=[str(value) for value in device.get("selected_tools", [])],
+        )
+    except (KeyError, ValueError, FrameworkManifestError):
+        return False
+    device["architecture_profile"] = profile
+    runner_path = device.get("runner_path")
+    if runner_path:
+        profile_path = (PROJECT_ROOT / str(runner_path)).parent / "exp" / "architecture_profile.json"
+        if not profile_path.exists():
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
 def normalize_extra_env(raw_values: dict[str, str], framework: str, platform: str) -> dict[str, str]:
     answers: dict[str, str] = {}
     for question in framework_env_questions(platform, framework):
@@ -567,6 +611,7 @@ def public_framework_spec(manifest: dict[str, Any]) -> dict[str, Any]:
         "supported_os": manifest["supported_os"],
         "allow_zero_tools": bool(manifest.get("allow_zero_tools", False)),
         "uses_pigion_model_config": bool(manifest.get("uses_pigion_model_config", True)),
+        "architecture_profile": manifest["architecture_profile"],
         "tools": manifest["tools"],
         "questions": questions,
         "lifecycle": sorted(manifest.get("lifecycle", {})),
@@ -668,6 +713,16 @@ def write_device_client(device: dict[str, Any]) -> str:
             raise RuntimeError(f"No run_agent or run_* callable found in {{RUNNER_MODULE}}")
 
 
+        def heartbeat_payload() -> dict[str, Any]:
+            try:
+                module = importlib.import_module(RUNNER_MODULE)
+                profile_path = Path(module.__file__).resolve().parent / "exp" / "architecture_profile.json"
+                profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                return {{"architecture_profile": profile}} if isinstance(profile, dict) else {{}}
+            except (OSError, json.JSONDecodeError):
+                return {{}}
+
+
         def send_log(message: str, job_id: str | None = None) -> None:
             payload = {{"message": message}}
             if job_id:
@@ -695,7 +750,7 @@ def write_device_client(device: dict[str, Any]) -> str:
         def main() -> None:
             while True:
                 try:
-                    request_json("POST", f"{{SERVER_URL}}/api/device/{{DEVICE_UUID}}/heartbeat", {{}})
+                    request_json("POST", f"{{SERVER_URL}}/api/device/{{DEVICE_UUID}}/heartbeat", heartbeat_payload())
                     job = request_json("GET", f"{{SERVER_URL}}/api/jobs/{{DEVICE_UUID}}").get("job")
                     if not job:
                         time.sleep(POLL_SECONDS)
@@ -1138,14 +1193,17 @@ def refresh_device_availability() -> list[dict[str, Any]]:
     changed = False
     devices = []
     for device in devices_doc.get("devices", {}).values():
+        if ensure_device_architecture_profile(device):
+            changed = True
         is_down = device_is_down(device, timeout)
         if device.get("is_down") != is_down:
             device["is_down"] = is_down
-            update_orchestrator_tool(device)
             changed = True
         devices.append(device)
     if changed:
         write_json(DEVICES_PATH, devices_doc)
+        for device in devices:
+            update_orchestrator_tool(device)
     return sorted(devices, key=lambda item: item.get("created_at", ""))
 
 
@@ -1160,6 +1218,7 @@ def job_counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
 @app.on_event("startup")
 def startup() -> None:
     ensure_files()
+    refresh_device_availability()
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1295,7 +1354,8 @@ def register_page(request: Request) -> str:
   <label>OpenAI base URL</label><input name="openai_base_url" value="https://api.openai.com/v1">
   </section>
   <label>Sudo password</label><input name="sudo_password" type="password" autocomplete="off">
-  <label>td.txt capability block</label><textarea name="capability_block" placeholder="Leave blank to use the discovered framework/runtime tool docs automatically."></textarea>
+  <label>Routing summary override (optional)</label><textarea name="capability_block" placeholder="Leave blank to derive the orchestrator summary from the architecture profile."></textarea>
+  <label>Device profile additions (optional JSON)</label><textarea name="architecture_profile" placeholder='{"physical_constraints":["Mounted indoors; cannot move."]}'></textarea>
   {f'<details><summary>Invalid framework diagnostics</summary><ul>{diagnostics}</ul></details>' if diagnostics else ''}
   <p><button type="submit">Register Device</button></p>
 </form>
@@ -1398,8 +1458,19 @@ async def register(request: Request) -> str:
         selected_tools = validate_tool_selection(values.get("selected_tools", []), platform, framework)
     except (FrameworkManifestError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not capability_block:
-        capability_block = default_capability_block(framework, platform, selected_tools)
+    raw_profile_overrides = data.get("architecture_profile", "").strip()
+    try:
+        profile_overrides = json.loads(raw_profile_overrides) if raw_profile_overrides else None
+        architecture_profile = device_architecture_profile(
+            manifest,
+            device_name=name,
+            device_os=device_os,
+            device_terminal=device_terminal,
+            selected_tools=selected_tools,
+            overrides=profile_overrides,
+        )
+    except (json.JSONDecodeError, FrameworkManifestError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid device architecture profile: {exc}") from exc
     environment_text = render_environment(device_os, device_terminal)
     try:
         runner_path = create_instance(
@@ -1409,6 +1480,7 @@ async def register(request: Request) -> str:
             framework=framework,
             environment_text=environment_text,
             framework_env=framework_env,
+            architecture_profile=architecture_profile,
             force=True,
         )
     except ValueError as exc:
@@ -1443,6 +1515,7 @@ async def register(request: Request) -> str:
         "api_token": api_token,
         "sudo_password": sudo_password,
         "capability_block": capability_block,
+        "architecture_profile": architecture_profile,
         "created_at": utc_now(),
         "last_heartbeat": None,
         "last_heartbeat_ts": None,
@@ -1589,7 +1662,13 @@ async def job_finished(job_id: str, request: Request) -> JSONResponse:
 
 
 @app.post("/api/device/{device_uuid}/heartbeat")
-def heartbeat(device_uuid: str) -> JSONResponse:
+async def heartbeat(device_uuid: str, request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    reported_profile = payload.get("architecture_profile") if isinstance(payload, dict) else None
+
     def mark_heartbeat(devices_doc: dict[str, Any]) -> dict[str, Any] | None:
         device = devices_doc.get("devices", {}).get(device_uuid)
         if not device:
@@ -1597,6 +1676,19 @@ def heartbeat(device_uuid: str) -> JSONResponse:
         device["last_heartbeat"] = utc_now()
         device["last_heartbeat_ts"] = now_ts()
         device["is_down"] = False
+        if isinstance(reported_profile, dict):
+            try:
+                # Runtime reports already contain provenance; validation prevents malformed facts.
+                reported_facts = {
+                    key: value
+                    for key, value in reported_profile.items()
+                    if key == "summary" or key in PROFILE_FIELDS
+                }
+                normalized = normalize_architecture_profile(reported_facts, source="watchdog runtime")
+                normalized["device"] = reported_profile.get("device", device.get("architecture_profile", {}).get("device", {}))
+                device["architecture_profile"] = normalized
+            except FrameworkManifestError:
+                pass
         return device
 
     device = update_json(DEVICES_PATH, {"devices": {}}, mark_heartbeat)

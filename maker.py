@@ -31,10 +31,171 @@ TOOL_MODULE_NAMES = {
 MANIFEST_SCHEMA_VERSION = 1
 TOOL_POLICIES = {"required", "default", "optional"}
 LIFECYCLE_PHASES = {"install", "verify", "upgrade", "uninstall"}
+PROFILE_FIELDS = (
+    "capabilities",
+    "unavailable_actions",
+    "observable_state",
+    "required_dependencies",
+    "privilege_boundaries",
+    "physical_constraints",
+    "known_failure_modes",
+    "uncertainty",
+)
+PROFILE_PROVENANCE = {"declared", "observed", "inferred"}
 
 
 class FrameworkManifestError(ValueError):
     """Raised when a framework/runtime manifest is unsafe or invalid."""
+
+
+def normalize_architecture_profile(raw_profile: object, *, source: str) -> dict:
+    """Validate a profile and normalize every fact to a provenance-bearing object."""
+    if raw_profile is None:
+        raw_profile = {}
+    if not isinstance(raw_profile, dict):
+        raise FrameworkManifestError("architecture_profile must be an object.")
+    unknown = set(raw_profile) - ({"summary"} | set(PROFILE_FIELDS))
+    if unknown:
+        raise FrameworkManifestError(
+            "architecture_profile has unknown fields: " + ", ".join(sorted(unknown))
+        )
+
+    normalized: dict[str, object] = {"summary": str(raw_profile.get("summary") or "").strip()}
+    for field in PROFILE_FIELDS:
+        values = raw_profile.get(field, [])
+        if not isinstance(values, list):
+            raise FrameworkManifestError(f"architecture_profile.{field} must be a list.")
+        entries: list[dict[str, str]] = []
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                statement = value.strip()
+                provenance = "declared"
+                entry_source = source
+            elif isinstance(value, dict):
+                statement = str(value.get("statement") or "").strip()
+                provenance = str(value.get("provenance") or "declared").strip().lower()
+                entry_source = str(value.get("source") or source).strip()
+                extra = set(value) - {"statement", "provenance", "source", "observed_at", "match_terms"}
+                if extra:
+                    raise FrameworkManifestError(
+                        f"architecture_profile.{field}[{index}] has unknown fields: "
+                        + ", ".join(sorted(extra))
+                    )
+            else:
+                raise FrameworkManifestError(
+                    f"architecture_profile.{field}[{index}] must be a string or object."
+                )
+            if not statement:
+                raise FrameworkManifestError(
+                    f"architecture_profile.{field}[{index}] needs a non-empty statement."
+                )
+            if provenance not in PROFILE_PROVENANCE:
+                raise FrameworkManifestError(
+                    f"architecture_profile.{field}[{index}] has invalid provenance {provenance!r}."
+                )
+            entry = {"statement": statement, "provenance": provenance, "source": entry_source}
+            if isinstance(value, dict) and value.get("observed_at"):
+                entry["observed_at"] = str(value["observed_at"])
+            if isinstance(value, dict) and "match_terms" in value:
+                match_terms = value["match_terms"]
+                if not isinstance(match_terms, list) or not match_terms or not all(
+                    isinstance(term, str) and term.strip() for term in match_terms
+                ):
+                    raise FrameworkManifestError(
+                        f"architecture_profile.{field}[{index}].match_terms must be a non-empty list of strings."
+                    )
+                entry["match_terms"] = [term.strip().lower() for term in match_terms]
+            entries.append(entry)
+        normalized[field] = entries
+    return normalized
+
+
+def device_architecture_profile(
+    manifest: dict,
+    *,
+    device_name: str,
+    device_os: str,
+    device_terminal: str,
+    selected_tools: list[str],
+    overrides: object = None,
+) -> dict:
+    """Build the concrete local profile bundled with a registered watchdog."""
+    profile = normalize_architecture_profile(
+        manifest.get("architecture_profile"), source="framework manifest"
+    )
+    if overrides:
+        additions = normalize_architecture_profile(overrides, source="device registration")
+        if additions["summary"]:
+            profile["summary"] = additions["summary"]
+        for field in PROFILE_FIELDS:
+            profile[field].extend(additions[field])
+
+    profile["device"] = {
+        "name": device_name,
+        "framework": str(manifest["framework"]),
+        "runtime": str(manifest["runtime"]),
+        "operating_system": device_os,
+        "terminal": device_terminal,
+        "selected_tools": list(selected_tools),
+    }
+    profile["observable_state"].append(
+        {
+            "statement": f"Operating-system state observable through the selected tools: {', '.join(selected_tools) or 'none'}.",
+            "provenance": "declared",
+            "source": "device registration",
+        }
+    )
+    return profile
+
+
+def concise_architecture_profile(profile: object) -> str:
+    """Render bounded routing context without exposing the watchdog's full internal state."""
+    if not isinstance(profile, dict):
+        return "No architecture profile reported."
+    parts: list[str] = []
+    summary = " ".join(str(profile.get("summary") or "").split())
+    if summary:
+        parts.append(summary)
+    labels = {
+        "capabilities": "Can",
+        "unavailable_actions": "Cannot",
+        "observable_state": "Observes",
+        "required_dependencies": "Needs",
+        "privilege_boundaries": "Privileges",
+        "physical_constraints": "Physical limits",
+        "known_failure_modes": "Known failures",
+        "uncertainty": "Uncertain",
+    }
+    for field in PROFILE_FIELDS:
+        statements = []
+        for entry in profile.get(field, []) if isinstance(profile.get(field, []), list) else []:
+            statement = entry.get("statement") if isinstance(entry, dict) else entry
+            if statement:
+                statements.append(" ".join(str(statement).split()))
+        if statements:
+            parts.append(f"{labels[field]}: {'; '.join(statements[:4])}")
+    return " | ".join(parts)[:4000] or "No architecture profile reported."
+
+
+def routing_architecture_profile(profile: object) -> dict:
+    """Return the bounded, provenance-bearing subset an orchestrator needs for routing."""
+    if not isinstance(profile, dict):
+        return {}
+    routed: dict[str, object] = {
+        "summary": " ".join(str(profile.get("summary") or "").split()),
+    }
+    device = profile.get("device")
+    if isinstance(device, dict):
+        routed["device"] = {
+            key: device.get(key)
+            for key in ("name", "framework", "runtime", "operating_system", "selected_tools")
+            if key in device
+        }
+    for field in PROFILE_FIELDS:
+        entries = profile.get(field, [])
+        if isinstance(entries, list) and entries:
+            routed[field] = entries[:4]
+    return routed
 
 
 def discover_tools() -> list[str]:
@@ -183,6 +344,9 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
         raise FrameworkManifestError(f"Manifest runtime must be {platform!r}.")
     if not isinstance(manifest.get("uses_pigion_model_config", True), bool):
         raise FrameworkManifestError("uses_pigion_model_config must be boolean.")
+    architecture_profile = normalize_architecture_profile(
+        manifest.get("architecture_profile"), source="framework manifest"
+    )
     supported_os = manifest.get("supported_os")
     if not isinstance(supported_os, list) or not supported_os or not all(isinstance(x, str) and x for x in supported_os):
         raise FrameworkManifestError("supported_os must be a non-empty list of strings.")
@@ -279,6 +443,7 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
         "tools": normalized_tools,
         "questions": questions,
         "lifecycle": normalized_lifecycle,
+        "architecture_profile": architecture_profile,
         "manifest_sha256": hashlib.sha256(raw).hexdigest(),
         "framework_revision": revision.hexdigest(),
     }
@@ -655,6 +820,7 @@ def create_instance(
     framework: str | None = None,
     environment_text: str | None = None,
     framework_env: dict[str, str] | None = None,
+    architecture_profile: dict | None = None,
     force: bool = False,
 ) -> Path:
     instance_name = validate_instance_name(instance_name)
@@ -705,6 +871,19 @@ def create_instance(
         (exp_dir / "framework_env.txt").write_text(render_framework_env(framework_env), encoding="utf-8")
     (exp_dir / "tool_import.txt").write_text(" ".join(selected_tools) + "\n", encoding="utf-8")
     manifest = validated_framework_manifest(platform, framework)
+    if architecture_profile is None:
+        architecture_profile = device_architecture_profile(
+            manifest,
+            device_name=instance_name,
+            device_os=environment_text.splitlines()[0].partition(":")[2].strip(),
+            device_terminal=environment_text.splitlines()[1].partition(":")[2].strip()
+            if len(environment_text.splitlines()) > 1 else "",
+            selected_tools=selected_tools,
+        )
+    (exp_dir / "architecture_profile.json").write_text(
+        json.dumps(architecture_profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     (exp_dir / "framework_manifest.json").write_text(
         json.dumps({**manifest, "selected_tools": selected_tools, "bundled_lifecycle": lifecycle}, indent=2) + "\n",
         encoding="utf-8",

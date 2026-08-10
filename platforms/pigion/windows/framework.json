@@ -8,6 +8,17 @@
   "runner": "../core/whatchdog.py",
   "allow_zero_tools": false,
   "uses_pigion_model_config": true,
+  "architecture_profile": {
+    "summary": "General-purpose Windows software agent operating through explicitly selected tools.",
+    "capabilities": ["Inspect and change local software state through selected tools."],
+    "unavailable_actions": ["Cannot sense or affect the physical world unless a device-specific tool exposes it."],
+    "observable_state": ["Can observe only data returned by selected tools and explicit goal context."],
+    "required_dependencies": ["Requires the configured model provider and each selected tool's runtime dependencies."],
+    "privilege_boundaries": ["Runs in its Scheduled Task user context; administrative actions require that account to have access."],
+    "physical_constraints": ["Has no assumed camera, microphone, actuator, display, or other physical interface."],
+    "known_failure_modes": ["Interactive commands and unbounded output can confuse the agent or exhaust its token budget.", "Command output may be incomplete, stale, or misinterpreted and must be verified."],
+    "uncertainty": ["Hardware, network reachability, installed commands, and current privileges are unknown until observed."]
+  },
   "tools": [
     {"name":"shell","module":"shell.py","policy":"default","documentation":"Shell, Description: Executes a shell command and returns stdout/stderr, Command - shell:COMMAND, Example - shell:echo hi"},
     {"name":"memadd","module":"memadd.py","policy":"default","documentation":"Memory, Description: Stores temporary context memory for the current session, Command - memadd:TEXT_OR_KEY=VALUE, Example - memadd:User prefers Python"},

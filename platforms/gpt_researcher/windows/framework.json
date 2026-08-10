@@ -8,6 +8,17 @@
   "runner": "../core/whatchdog.py",
   "allow_zero_tools": false,
   "uses_pigion_model_config": false,
+  "architecture_profile": {
+    "summary": "Windows deep-research wrapper; it researches topics but is not a general device-control agent.",
+    "capabilities": ["Produce source-backed research reports using the configured search, browser, extraction, and inference services."],
+    "unavailable_actions": ["Cannot perform arbitrary shell, filesystem, device-control, or physical actions."],
+    "observable_state": ["Observes public or reachable web content returned by its configured research stack."],
+    "required_dependencies": ["Requires Ollama, an embedding model, SearXNG, browser support, and the selected extraction engine."],
+    "privilege_boundaries": ["Uses only the permissions of its Scheduled Task account and configured network services."],
+    "physical_constraints": ["Has no physical sensors or actuators."],
+    "known_failure_modes": ["Research quality degrades when search, model, browser, or extraction dependencies are unavailable."],
+    "uncertainty": ["Cannot guarantee source completeness, freshness, accessibility, or factual correctness."]
+  },
   "tools": [
     {
       "name": "research",

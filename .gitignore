@@ -1,8 +1,20 @@
+# Default-deny new top-level content. Source additions belong in the server,
+# orchestrator, or platforms trees; maker.py is the repository helper/generator.
+/*
+!/.gitignore
+!/maker.py
+!/server/
+!/orchestrator/
+!/platforms/
+
+# Local, generated, and runtime content inside the allowed source trees.
 .venv/
 .env
 dist/
 *.log
-__pycache__
+*.lock
+__pycache__/
+*.py[cod]
 *.jsonl
 test/
 test.py
@@ -12,8 +24,11 @@ test.py
 /server/devices.json
 /server/jobs.json
 /server/sessions.json
+/server/*.json.lock
 /server/installers/
 
 # Generated remote-device tools
 /orchestrator/tools/device_*.py
 /orchestrator/exp/td.txt
+/orchestrator/exp/device_profiles.json
+/orchestrator/exp/device_profiles.json.lock

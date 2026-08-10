@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -8,6 +9,15 @@ from typing import Any
 
 
 NAME = "gpt_researcher"
+
+
+def _architecture_profile() -> dict[str, Any]:
+    path = Path(__file__).resolve().parent / "exp" / "architecture_profile.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 def _parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
@@ -88,7 +98,15 @@ def _configure_research_env() -> dict[str, str]:
 async def _run_research(goal: str, report_type: str) -> str:
     from gpt_researcher import GPTResearcher
 
-    researcher = GPTResearcher(query=goal, report_type=report_type)
+    profile = _architecture_profile()
+    profiled_goal = (
+        "LOCAL ARCHITECTURE PROFILE:\n"
+        + json.dumps(profile, ensure_ascii=False)
+        + "\nUse this as architectural self-knowledge. If the request exceeds a known limit, "
+          "report that limit and its provenance rather than inventing a capability.\n\nUSER GOAL:\n"
+        + goal
+    )
+    researcher = GPTResearcher(query=profiled_goal, report_type=report_type)
     await researcher.conduct_research()
     return await researcher.write_report()
 
@@ -102,6 +120,7 @@ def run_agent(goal: str) -> dict[str, Any]:
             "dry_run": True,
             "goal": goal,
             "config": config,
+            "architecture_profile": _architecture_profile(),
         }
 
     report = asyncio.run(_run_research(goal, config["report_type"]))

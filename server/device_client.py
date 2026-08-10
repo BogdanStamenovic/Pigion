@@ -7,6 +7,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -32,12 +33,22 @@ def load_runner(runner_module: str):
     raise RuntimeError(f"No run_agent or run_* callable found in {runner_module}")
 
 
+def heartbeat_payload(runner_module: str) -> dict[str, Any]:
+    try:
+        module = importlib.import_module(runner_module)
+        profile_path = Path(module.__file__).resolve().parent / "exp" / "architecture_profile.json"
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        return {"architecture_profile": profile} if isinstance(profile, dict) else {}
+    except (AttributeError, OSError, json.JSONDecodeError):
+        return {}
+
+
 def run_client(server: str, device_uuid: str, runner_module: str, poll_seconds: float) -> None:
     server = server.rstrip("/")
     run_agent = load_runner(runner_module)
     while True:
         try:
-            request_json("POST", f"{server}/api/device/{device_uuid}/heartbeat", {})
+            request_json("POST", f"{server}/api/device/{device_uuid}/heartbeat", heartbeat_payload(runner_module))
             job = request_json("GET", f"{server}/api/jobs/{device_uuid}").get("job")
             if not job:
                 time.sleep(poll_seconds)

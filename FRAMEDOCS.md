@@ -126,6 +126,17 @@ The manifest is the source of truth for registration, tools, supported operating
   "runner": "../core/whatchdog.py",
   "allow_zero_tools": false,
   "uses_pigion_model_config": false,
+  "architecture_profile": {
+    "summary": "Research-only software agent.",
+    "capabilities": ["Research reachable web sources"],
+    "unavailable_actions": ["Cannot control local or physical devices"],
+    "observable_state": ["Web content returned by configured services"],
+    "required_dependencies": ["Model, search, browser, and extraction services"],
+    "privilege_boundaries": ["Service-account and network permissions"],
+    "physical_constraints": ["No sensors or actuators"],
+    "known_failure_modes": ["Incomplete search or extraction results"],
+    "uncertainty": ["Source completeness and correctness are not guaranteed"]
+  },
   "tools": [
     {
       "name": "return",
@@ -170,6 +181,8 @@ Tool policy has three values:
 When `--tools` is omitted, `maker.py` selects required and default tools. Explicit CLI and web selections are validated against the same manifest. Required tools are always included. `allow_zero_tools` controls whether an empty final selection is valid.
 
 Set `uses_pigion_model_config` to `true` only when the wrapper consumes the built-in Gemini/OpenAI/Ollama fields. Other frameworks should declare their own provider questions and the web UI will hide the Pigion-specific model controls.
+
+`architecture_profile` declares eight limitation-aware fact groups: `capabilities`, `unavailable_actions`, `observable_state`, `required_dependencies`, `privilege_boundaries`, `physical_constraints`, `known_failure_modes`, and `uncertainty`. A string is normalized to a fact with `declared` provenance from the framework manifest. Explicit fact objects may use `declared`, `observed`, or `inferred` provenance and include a `source`. An `unavailable_actions` fact may include explicit lowercase `match_terms`; matching goals are blocked deterministically before model planning, so a weak model cannot route through a known limit. Registration may add device-specific facts as JSON. Pigion bundles the concrete profile as `exp/architecture_profile.json`, injects it into the local watchdog, and sends it on heartbeat so the orchestrator can route against a concise profile. Runtime recovery adds bounded failure facts with `observed` provenance.
 
 `name` must be a valid environment-variable style identifier. The web server writes the selected answers into the generated installer `.env`; `maker.py` writes them to `<device>/exp/framework_env.txt` for locally generated packages. Framework runners should load those values themselves and translate them into whatever their upstream library expects.
 
@@ -231,9 +244,9 @@ During registration, the server:
 2. Validates the runtime manifest and the submitted required/default/optional tool selection.
 3. Copies `platforms/<framework>/core/whatchdog.py` into `<device>/run_<device>.py`.
 4. Copies the discovered tool modules from `platforms/<framework>/<runtime>/tools/`.
-5. Writes `<device>/exp/td.txt`, `<device>/exp/enving.txt`, and `<device>/exp/tool_import.txt`.
+5. Writes `<device>/exp/td.txt`, `<device>/exp/enving.txt`, `<device>/exp/architecture_profile.json`, and `<device>/exp/tool_import.txt`.
 6. Bundles lifecycle scripts and generates an installer that downloads the bundle and the unchanged `client.py`.
-7. Stores `framework`, `platform`, manifest schema/hash, lifecycle identifiers, runner module, and selected tools in `server/devices.json`.
+7. Stores `framework`, `platform`, manifest schema/hash, lifecycle identifiers, runner module, selected tools, and the concrete architecture profile in `server/devices.json`.
 
 The communication layer does not know which framework is behind the runner. It only knows the device UUID, server URL, and runner module.
 

@@ -15,9 +15,9 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 
 ## 2. Architecture and Limitation Awareness
 
-**Current:** Framework manifests describe tools, configuration, lifecycle scripts, and supported operating systems, but neither the watchdog nor orchestrator receives a complete model of what the device can do, cannot do, cannot observe, or is likely to misunderstand.
+**Current:** Framework and device profiles declare capabilities, unavailable actions, observable state, dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty. The full profile is injected into the watchdog; heartbeat updates give the orchestrator a routing view. Facts retain `declared`, `observed`, or `inferred` provenance, and runtime recovery records observed failure modes.
 
-**Next milestone:** Make limitations part of the agent architecture instead of leaving them as prose or discovering them only after failure.
+**Next milestone:** Refine profiles from broader real-device use and improve automatic changed-state observations without turning architectural self-knowledge into a safety or approval layer.
 
 - Let each framework/device declare capabilities, unavailable actions, observable state, required dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty.
 - Inject the local profile into the watchdog so it understands its own body, tools, blind spots, and architectural limits before planning.

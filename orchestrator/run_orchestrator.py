@@ -89,6 +89,43 @@ def load_env(path: str = "exp/enving.txt", abs: str = ABS_PATH) -> str:
         return "No environment info provided."
 
 
+def load_device_profiles(path: str = "exp/device_profiles.json", abs_path: str = ABS_PATH) -> Dict[str, Any]:
+    try:
+        with open(os.path.join(abs_path, path), "r", encoding="utf-8") as f:
+            profiles = json.load(f)
+        return profiles if isinstance(profiles, dict) else {"devices": {}}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {"devices": {}}
+
+
+def matching_routing_limit(goal: str) -> Optional[Dict[str, Any]]:
+    normalized_goal = " ".join(goal.lower().split())
+    devices = load_device_profiles().get("devices", {})
+    if not isinstance(devices, dict):
+        return None
+    for command, device in devices.items():
+        profile = device.get("profile", {}) if isinstance(device, dict) else {}
+        facts = profile.get("unavailable_actions", []) if isinstance(profile, dict) else []
+        for fact in facts if isinstance(facts, list) else []:
+            if not isinstance(fact, dict):
+                continue
+            terms = fact.get("match_terms", [])
+            if isinstance(terms, list) and any(
+                " ".join(str(term).lower().split()) in normalized_goal for term in terms if str(term).strip()
+            ):
+                return {**fact, "device_command": command}
+    return None
+
+
+def routing_limit_report(fact: Dict[str, Any]) -> str:
+    return (
+        "Routing blocked by a known device architecture limit: "
+        f"{fact.get('statement', 'unsupported action')} "
+        f"[device={fact.get('device_command', 'unknown')}; "
+        f"provenance={fact.get('provenance', 'unknown')}; source={fact.get('source', 'unknown')}]"
+    )
+
+
 TOOL_DOCS = load_tool_docs()
 ENVING = load_env()
 TOOLS = tool_import(ABS_PATH)
@@ -331,15 +368,17 @@ def build_system_prompt(
     action_history: List[Dict[str, Any]],
     tool_docs: str = TOOL_DOCS,
 ) -> str:
+    device_profiles = load_device_profiles()
     return f"""
 You are the Pigion orchestrator.
 
 You MUST always respond in valid JSON.
 
-SYSTEM ENVIRONMENT:
-{ENVING}
 AVAILABLE_TOOLS:
 {tool_docs}
+
+REGISTERED DEVICE ARCHITECTURE PROFILES:
+{safe_json(device_profiles)}
 
 GLOBAL GOAL:
 {goal}
@@ -363,6 +402,11 @@ CORE EXECUTION RULES:
 - Do not use UUIDs in model-visible tool calls. UUIDs are private to the generated tool implementation.
 - Do not do the device's work yourself.
 - Do not invent devices or tools that are not listed in AVAILABLE_TOOLS.
+- Route only capabilities supported by the selected device's architecture profile and available tool.
+- Treat unavailable actions, dependencies, privilege boundaries, physical constraints, known failures, and uncertainty as routing facts.
+- Treat unavailable_actions as known routing limits; do not dispatch a goal to a device merely to probe or contradict them.
+- If every registered device exceeds a known limit, report the exact limit and its provenance instead of routing anyway.
+- Profile facts are architectural self-knowledge, not permissions or a safety/approval layer.
 - If no suitable registered device tool exists, report that routing is blocked.
 - For each action, choose exactly one matching device tool and pass the needed goal or message as the tool input.
 - The expected internal reasoning is simple: "yea, I should call this device tool for this goal."
@@ -1265,6 +1309,10 @@ def apply_recovery_decision(
 # MAIN LOOP
 # =========================
 def run_agent(goal: str) -> None:
+    known_limit = matching_routing_limit(goal)
+    if known_limit:
+        print(routing_limit_report(known_limit))
+        return
     global returned_output, tokens_used
     returned_output = ""
     tokens_used = 0

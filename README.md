@@ -53,6 +53,7 @@ The current repository is a working daily-use prototype with:
 - Pluggable framework/runtime manifests with validated configuration questions.
 - Required, default, and optional tool policies with per-device selection.
 - Framework-owned install, verification, upgrade, and uninstall lifecycle scripts.
+- Structured, provenance-bearing architecture profiles shared with each watchdog and summarized for the orchestrator.
 - Device heartbeats, queued goals, progress, results, logs, and down-state reporting.
 - Remote removal that asks the installed watchdog to uninstall itself before deleting its registry state.
 - Pigion's general planning/tool/recovery loop and a GPT Researcher wrapper.
@@ -61,7 +62,6 @@ What does **not** exist yet:
 
 - A shared watchdog observation or context bus.
 - Orchestrator-directed "look out for this" subscriptions.
-- A structured architecture/limitations profile understood by both each watchdog and the orchestrator.
 - A general helper-trigger convention across frameworks.
 - Mature printer, drone, robot, or home-device integrations.
 - Industrial reliability, isolation, credential protection, or safety guarantees.
@@ -304,9 +304,9 @@ The roadmap has no dates and makes no polished-product commitments. Each phase s
 
 ### 2. Architecture and Limitation Awareness
 
-**Current:** Framework manifests describe tools, configuration, lifecycle scripts, and supported operating systems, but neither the watchdog nor orchestrator receives a complete model of what the device can do, cannot do, cannot observe, or is likely to misunderstand.
+**Current:** Framework and device profiles declare capabilities, unavailable actions, observable state, dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty. The full profile is injected into the watchdog; heartbeat updates give the orchestrator a routing view. Facts retain `declared`, `observed`, or `inferred` provenance, and runtime recovery records observed failure modes.
 
-**Next milestone:** Make limitations part of the agent architecture instead of leaving them as prose or discovering them only after failure.
+**Next milestone:** Refine profiles from broader real-device use and improve automatic changed-state observations without turning architectural self-knowledge into a safety or approval layer.
 
 - Let each framework/device declare capabilities, unavailable actions, observable state, required dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty.
 - Inject the local profile into the watchdog so it understands its own body, tools, blind spots, and architectural limits before planning.
