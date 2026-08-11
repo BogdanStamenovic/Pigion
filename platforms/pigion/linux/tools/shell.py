@@ -409,6 +409,25 @@ def _extract_cwd_marker(output: str, marker: str) -> tuple[str, Optional[str]]:
     return "\n".join(kept_lines).strip(), cwd
 
 
+def _extract_exit_marker(output: str, marker: str) -> tuple[str, Optional[int]]:
+    if not output or not marker:
+        return output, None
+
+    exit_code = None
+    kept_lines = []
+    for line in output.splitlines():
+        if line.startswith(marker):
+            raw_code = line[len(marker):].strip()
+            try:
+                exit_code = int(raw_code)
+            except ValueError:
+                pass
+            continue
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip(), exit_code
+
+
 def _load_dotenv(path: str) -> None:
     try:
         if not os.path.exists(path):
@@ -885,6 +904,25 @@ def _send_to_fd(fd: Optional[int], text: str) -> None:
         os.write(fd, (line + "\n").encode("utf-8"))
 
 
+def _shell_syntax_error(command: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-n"],
+            input=command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"Could not validate shell syntax: {exc}"
+    if result.returncode == 0:
+        return None
+    detail = result.stdout.strip() or "invalid shell syntax"
+    return f"Shell syntax validation failed: {detail}"
+
+
 def _read_until_marker_or_idle_fd(
     fd: Optional[int],
     pid: Optional[int],
@@ -1183,6 +1221,7 @@ def run_shell(
 
                 return {
                     "output": _sanitize_output(processed, sudo_password, None),
+                    "exit_code": proc.returncode,
                     "interactive_mode": False,
                     "completed": True,
                     "branch_mode": False,
@@ -1198,7 +1237,9 @@ def run_shell(
             _send_to_fd(_SHELL_FD, wrapped)
 
             marker = f"__CMD_DONE_{_COUNTER + 1}__"
+            exit_marker = f"__CMD_EXIT_{_COUNTER + 1}__"
             _COUNTER += 1
+            os.write(_SHELL_FD, f'printf "{exit_marker}%s\\n" "$?"\n'.encode("utf-8"))
             os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
 
             read_result = _read_until_marker_or_idle_fd(
@@ -1212,7 +1253,7 @@ def run_shell(
                 tail_lines=tail_lines,
             )
 
-            output = read_result["output"]
+            output, exit_code = _extract_exit_marker(read_result["output"], exit_marker)
             completed = bool(read_result["completed"])
             interactive_mode = bool(read_result["interactive_mode"])
 
@@ -1221,6 +1262,7 @@ def run_shell(
 
             return {
                 "output": output,
+                "exit_code": exit_code,
                 "interactive_mode": interactive_mode,
                 "completed": completed,
                 "branch_mode": False,
@@ -1231,6 +1273,20 @@ def run_shell(
             }
 
         use_branch = _should_use_branch(command)
+
+        syntax_error = _shell_syntax_error(command)
+        if syntax_error:
+            return {
+                "output": syntax_error,
+                "exit_code": 2,
+                "interactive_mode": False,
+                "completed": True,
+                "branch_mode": False,
+                "session_label": None,
+                "cwd_raw": _undecorate_cwd(cwd) if cwd else _START_CWD,
+                "cwd_display": None,
+                "continuing_interactive": False,
+            }
 
         if use_branch:
             branch_cwd = _undecorate_cwd(cwd) if cwd else _START_CWD
@@ -1283,10 +1339,12 @@ def run_shell(
         _COUNTER += 1
         marker = f"__CMD_DONE_{_COUNTER}__"
         cwd_marker = f"__CMD_CWD_{_COUNTER}__"
+        exit_marker = f"__CMD_EXIT_{_COUNTER}__"
 
         for line in command.splitlines():
             os.write(_SHELL_FD, (line + "\n").encode("utf-8"))
 
+        os.write(_SHELL_FD, f'printf "{exit_marker}%s\\n" "$?"\n'.encode("utf-8"))
         os.write(_SHELL_FD, f'printf "{cwd_marker}%s\\n" "$PWD"\n'.encode("utf-8"))
         os.write(_SHELL_FD, f'printf "{marker}\\n"\n'.encode("utf-8"))
 
@@ -1301,7 +1359,7 @@ def run_shell(
             tail_lines=tail_lines,
         )
 
-        output = read_result["output"]
+        output, exit_code = _extract_exit_marker(read_result["output"], exit_marker)
         output, cwd_after = _extract_cwd_marker(output, cwd_marker)
         completed = bool(read_result["completed"])
         interactive_mode = bool(read_result["interactive_mode"])
@@ -1313,6 +1371,7 @@ def run_shell(
 
         return {
             "output": output,
+            "exit_code": exit_code,
             "interactive_mode": interactive_mode,
             "completed": completed,
             "branch_mode": False,
@@ -1477,8 +1536,10 @@ def shell(command, memory, local_state, program_state):
             local_state["CURRENT_WORKING_DIRECTORY"] = os.getcwd()
 
     # Program state carries everything else.
-    local_state["last_action"] = command
+    local_state["last_action"] = f"shell:{command}"
     local_state["last_tool_output"] = output
+    exit_code = result.get("exit_code")
+    local_state["last_tool_exit_code"] = exit_code
     program_state["INTERACTIVE_MODE"] = "ON" if interactive_mode else "OFF"
     program_state["INTERACTIVE_COMPLETED"] = completed
     program_state["BRANCH_MODE"] = "ON" if branch_mode else "OFF"
@@ -1537,8 +1598,9 @@ def shell(command, memory, local_state, program_state):
 
     print(local_state["CURRENT_WORKING_DIRECTORY"])
     return {
-        "ok": True,
+        "ok": completed and (exit_code is None or exit_code == 0),
         "output": output,
+        "exit_code": exit_code,
         "memory": memory,
         "state": local_state,
         "program_state": program_state,
