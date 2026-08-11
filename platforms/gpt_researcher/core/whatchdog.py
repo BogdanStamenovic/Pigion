@@ -19,6 +19,22 @@ def _architecture_profile() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
 
+
+def _capability_block() -> str:
+    profile = _architecture_profile()
+    lines: list[str] = []
+    summary = " ".join(str(profile.get("summary") or "").split())
+    if summary:
+        lines.append(summary)
+    capabilities = profile.get("capabilities", [])
+    if isinstance(capabilities, list):
+        for item in capabilities:
+            statement = item.get("statement") if isinstance(item, dict) else item
+            statement = " ".join(str(statement or "").split())
+            if statement:
+                lines.append(f"- {statement}")
+    return "\n".join(lines) or "Research capability is provided by the configured GPT Researcher runtime."
+
 def _parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -98,12 +114,13 @@ def _configure_research_env() -> dict[str, str]:
 async def _run_research(goal: str, report_type: str) -> str:
     from gpt_researcher import GPTResearcher
 
-    profile = _architecture_profile()
     profiled_goal = (
-        "LOCAL ARCHITECTURE PROFILE:\n"
-        + json.dumps(profile, ensure_ascii=False)
-        + "\nUse this as architectural self-knowledge. If the request exceeds a known limit, "
-          "report that limit and its provenance rather than inventing a capability.\n\nUSER GOAL:\n"
+        "CAPABILITY BLOCK:\n"
+        + _capability_block()
+        + "\n\nRUNTIME ARCHITECTURE:\n"
+          "This wrapper starts one GPT Researcher run for this goal. It does not receive private context from a "
+          "previous wrapper call; only the user goal below and state managed internally by GPT Researcher are "
+          "available.\n\nUSER GOAL:\n"
         + goal
     )
     researcher = GPTResearcher(query=profiled_goal, report_type=report_type)
