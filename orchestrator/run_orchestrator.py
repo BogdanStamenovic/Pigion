@@ -47,30 +47,43 @@ USE_GOAL_FORMALIZER = str(os.getenv("USE_GOAL_FORMALIZER", "False")).lower() in 
 # =========================
 # ENV LOADERS
 # =========================
-def tool_import(abs_path: str = ABS_PATH) -> dict:  # Renamed 'abs' to 'abs_path' to avoid shadowing built-in abs()
+def tool_import_names(tool_docs: str) -> List[str]:
+    """Extract tool module names from manifest command markers."""
+    names: List[str] = []
+    for line_number, line in enumerate(tool_docs.splitlines(), start=1):
+        if not line.strip():
+            continue
+        match = re.search(
+            r"(?:^|,)\s*Command\s*-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            raise ImportError(f"Invalid tool documentation on line {line_number}: missing Command marker")
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def tool_import(abs_path: str = ABS_PATH) -> dict:
     path = os.path.join(abs_path, "exp/td.txt")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            a = f.read()
-            # Removed redundant f.close() as 'with' handles it automatically
-        to_import = []
-        data_lines = a.splitlines()
-        for line in data_lines:
-            a = line.split(",")
-            to_process = a[2]
-            to_process = to_process.split(" - ")
-            to_process = to_process[1].split(":")
-            to_import.append(to_process[0])
-        tools = {}
-        for imp in to_import:
-            if imp == "return":
-                imp = "return_value"
-            print(f"tools.{imp}")
-            tools[imp] = import_module(f"{NAME}.tools.{imp}")
-            tools[imp] = getattr(tools[imp], imp)
-        return tools
+            tool_docs = f.read()
     except FileNotFoundError:
-        raise ImportError(f"Tool import file not found at {path}. Ensure that 'tool_import.txt' exists and lists the tools to import.")
+        raise ImportError(f"Tool documentation file not found at {path}.")
+
+    tools = {}
+    for imp in tool_import_names(tool_docs):
+        if imp == "return":
+            imp = "return_value"
+        print(f"tools.{imp}")
+        tools[imp] = import_module(f"{NAME}.tools.{imp}")
+        tools[imp] = getattr(tools[imp], imp)
+    return tools
+
+
 def load_tool_docs(path: str = "exp/td.txt", abs: str = ABS_PATH) -> str:
     path = os.path.join(abs, path)
     try:
