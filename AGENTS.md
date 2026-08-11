@@ -80,6 +80,12 @@ return:<actual text> — Return a final value.
 Avoid giving the action selector multiple equivalent syntaxes. Never rely only on prose to prevent placeholder calls;
 validate the selected action before execution.
 
+The current Gemini path exposes these tools as native function declarations derived from the same `td.txt` entries;
+the textual forms above remain the OpenAI/Ollama fallback and Pigion's internal executor representation. Do not show
+both representations to Gemini. SDK automatic execution stays disabled so the Pigion evaluator and recovery loop keep
+control. The earlier gauntlet measurements predate this native-call adapter, so its behavioral effect must be measured
+separately rather than inferred from those scores.
+
 ### 4. Salient examples can overpower abstract rules
 
 Flash-Lite follows short concrete examples strongly. This is useful, but examples can become templates copied too
@@ -260,6 +266,9 @@ When modifying Pigion around Flash-Lite:
 12. Report model observations with configuration and provenance. Label hypotheses as hypotheses.
 13. Do not add generalized permission, approval, or safety policy under the guise of model reliability. This project's
     architectural limit facts constrain capability and routing; they are not authorization rules.
+14. After completing and verifying repository changes, always commit all in-scope changes and push the current branch
+    to its configured remote unless the user explicitly says not to commit or push. Never include unrelated user work
+    in that commit.
 
 ## Review checklist for prompt patches
 

@@ -257,7 +257,12 @@ If the device is offline, it remains registered with uninstall pending so it can
 6. Searches prior failure/recovery examples.
 7. Retries, replaces steps, or continues until completion or a configured limit.
 
-Its tools include shell execution, search/URL extraction, temporary memory, permanent memory in supported platform packages, direct user questions, and final return handling. Tool imports still depend on the brittle `Command - prefix:` documentation format.
+For Gemini, action selection, recovery selection, and persistent-session input use native function calls with SDK-side
+automatic execution disabled. The runner converts exactly one returned function call into its existing internal action
+shape, then keeps the same tool execution, evaluation, recovery, and persistence loop. OpenAI and Ollama retain the
+textual action protocol as a compatibility path.
+
+Its tools include shell execution, search/URL extraction, temporary memory, permanent memory in supported platform packages, direct user questions, and final return handling. Tool imports—and Gemini function declarations—are still derived from the brittle `Command - prefix:` documentation format.
 
 Generated packages expose the runner through `run_agent(goal)` and are normally called by the framework-neutral device client. For local wrapper development, generate a disposable instance with `maker.py` rather than maintaining another copied runner:
 

@@ -115,6 +115,12 @@ Some actions are intercepted in `run_tool()` before dynamic dispatch:
 
 Because of that, the platform `return_value.py` and `askuser.py` modules are compatibility files rather than the best examples of the standard dispatched-tool contract. A new tool should follow the signature and return shape above.
 
+With the Gemini provider, the model does not see or emit the internal `toolname:input` form. The runner derives one
+native function declaration per loaded tool from `td.txt`, requires exactly one Gemini function call, and converts its
+string `input` argument back to the existing internal action immediately before `run_tool()`. SDK automatic function
+execution is disabled so evaluation, failure recovery, experience storage, and interactive-mode transitions remain
+owned by Pigion. The textual form remains the OpenAI/Ollama compatibility protocol.
+
 ## State Rules
 
 Tools receive:
