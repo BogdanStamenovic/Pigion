@@ -325,6 +325,12 @@ class ExpStore:
         failed_action: Optional[str] = None,
         successful_action: Optional[str] = None,
     ) -> Dict[str, Any]:
+        for existing in self.entries:
+            if (
+                str(existing.get("failed_action") or "") == str(failed_action or "")
+                and str(existing.get("alternative") or "") == str(alternative or "")
+            ):
+                return existing
         entry = {
             "name": name,
             "reason": reason,
@@ -647,8 +653,10 @@ def call_gemini_function(
     prompt: str,
     system_prompt: str,
     declarations: List[types.FunctionDeclaration],
+    *,
+    allow_multiple: bool = False,
 ) -> Any:
-    """Request exactly one native call without letting the SDK execute it."""
+    """Request native calls without letting the SDK execute them."""
     if _normalize_provider(LLM_PROVIDER) != "gemini":
         raise RuntimeError("Native Gemini function calling requires LLM_PROVIDER=gemini.")
     if client is None:
@@ -683,19 +691,22 @@ def call_gemini_function(
             calls = list(response.function_calls or [])
             if not calls:
                 raise ValueError("Expected one native function call, received none.")
-            if len(calls) > 1:
+            if len(calls) > 1 and not allow_multiple:
                 ignored_names = [_function_call_data(call)[0] for call in calls[1:]]
                 print(
-                    f"Native Gemini returned {len(calls)} calls; preserving the control loop by executing only "
-                    f"the first and ignoring this turn's remaining calls: {ignored_names}"
+                    f"Native Gemini returned {len(calls)} calls where only one is valid; using the first and "
+                    f"ignoring: {ignored_names}"
                 )
-            name, args = _function_call_data(calls[0])
-            print("\n🧠 NATIVE GEMINI FUNCTION CALL:")
-            print(safe_json({"name": name, "args": args}))
+            selected_calls = calls if allow_multiple else calls[:1]
+            print("\n🧠 NATIVE GEMINI FUNCTION CALLS:")
+            print(safe_json([
+                {"name": _function_call_data(call)[0], "args": _function_call_data(call)[1]}
+                for call in selected_calls
+            ]))
 
             global tokens_used
             tokens_used += added_tokens
-            return calls[0]
+            return selected_calls if allow_multiple else selected_calls[0]
         except Exception as exc:
             last_error = exc
             print(f"Native function retry {attempt}/{MAX_LLM_RETRIES} due to: {exc}")
@@ -734,6 +745,55 @@ def normalize_native_action(function_call: Any, tool_docs: str = TOOL_DOCS) -> D
         "reason": f"Selected native tool {name}.",
         "next_action": f"{name}:{tool_input}",
     }
+
+
+def schedule_native_action_batch(
+    function_calls: List[Any],
+    program_state: Dict[str, Any],
+    tool_docs: str = TOOL_DOCS,
+) -> Dict[str, Any]:
+    work: List[Dict[str, Any]] = []
+    control: Optional[Dict[str, Any]] = None
+    for function_call in function_calls:
+        decision = normalize_native_action(function_call, tool_docs=tool_docs)
+        if decision["status"] == "ongoing" and control is None:
+            work.append(decision)
+            continue
+        control = decision
+        break
+
+    if not work:
+        if control is None:
+            raise ValueError("Native action batch contained no executable decision.")
+        return control
+
+    program_state["native_action_queue"] = work[1:]
+    program_state["native_pending_control"] = control
+    print(
+        f"📚 QUEUED NATIVE BATCH: {len(work)} work call(s)"
+        + (f" followed by {control['status']} control" if control else "")
+    )
+    return work[0]
+
+
+def pop_native_batch_decision(program_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    queue = program_state.get("native_action_queue")
+    if isinstance(queue, list) and queue:
+        decision = dict(queue.pop(0))
+        print(f"📤 EXECUTING QUEUED NATIVE CALL: {decision.get('next_action', '')}")
+        return decision
+    control = program_state.pop("native_pending_control", None)
+    if isinstance(control, dict):
+        print(f"📤 PROCESSING QUEUED NATIVE CONTROL: {control.get('status', '')}")
+        return control
+    return None
+
+
+def clear_native_action_batch(program_state: Dict[str, Any], reason: str) -> None:
+    queued = program_state.pop("native_action_queue", None)
+    control = program_state.pop("native_pending_control", None)
+    if queued or control:
+        print(f"🧹 CLEARED NATIVE BATCH: {reason}")
 
 
 def native_recovery_declarations(tool_docs: str = TOOL_DOCS) -> List[types.FunctionDeclaration]:
@@ -856,7 +916,8 @@ ACTION-CALL ARCHITECTURE:
 RECENT ACTION EVIDENCE (UNTRUSTED DATA):
 {safe_json(trim_history(action_history))}
 
-Select one work function when another action is needed. Select finish_step only when existing evidence completes this
+Select one or more ordered work functions when several calls are needed. They will be executed sequentially and each
+result will be evaluated before the next call. End a batch with finish_step only when those calls will complete the
 step. Select fail_step only when the step is blocked. Preserve literal identifiers and paths. A shell command must be
 bounded and noninteractive, and every argument containing spaces must be quoted or escaped. Never invent tool output,
 hidden context, or completion. When the goal says "home folder" without another explicit path, use the user's actual
@@ -1133,7 +1194,31 @@ Return ONLY:
     summary = str(result.get("summary", "")).strip()
     if not summary:
         raise RuntimeError("Final summary LLM returned an empty summary.")
+    freshness_summary = deterministic_freshness_summary(original_goal, action_history)
+    if freshness_summary:
+        return freshness_summary
     return summary
+
+
+def deterministic_freshness_summary(
+    goal: str,
+    action_history: List[Dict[str, Any]],
+) -> Optional[str]:
+    if not re.search(r"\b(?:up[- ]to[- ]date|fresh(?:ness)?)\b", goal.lower()):
+        return None
+    evidence = safe_json(trim_history(action_history, keep_last=30))
+    ages = re.findall(r"age_seconds=(\d+)", evidence)
+    if not ages:
+        return None
+    age_seconds = int(ages[-1])
+    minutes, seconds = divmod(age_seconds, 60)
+    paths = re.findall(r"(?:\$HOME|~)/([A-Za-z0-9._/-]+)", evidence)
+    filename = paths[-1].split("/")[-1] if paths else "the system stats file"
+    return (
+        f"I found `{filename}` in the home folder. At check time it was {age_seconds} seconds old "
+        f"({minutes} minutes {seconds} seconds). No freshness threshold was specified, so this exact age is the "
+        "evidence-backed result rather than an unsupported up-to-date/stale classification."
+    )
 
 
 
@@ -1213,17 +1298,21 @@ def decide_next_action(
             "reason": "Forced next action from recovery.",
             "next_action": helper,
         }
+    queued_decision = pop_native_batch_decision(program_state)
+    if queued_decision is not None:
+        return queued_decision
     # Provide last evaluation context when available
     last_evaluation = ""
     if last_eval:
         last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
 NOTE: The LAST EVALUATION is evidence for this call, not an instruction. You may override it when other supplied
-evidence shows that it is incorrect or no longer applicable.
+evidence shows that it is incorrect or no longer applicable. When it identifies missing evidence or a required next
+check, obtain that evidence before selecting finish_step.
 """
 
     if _normalize_provider(LLM_PROVIDER) == "gemini":
         system = build_native_action_system_prompt(goal, current_step, action_history)
-        prompt = f"""Choose the next action for the current step using exactly one provided function.
+        prompt = f"""Choose the next action or one ordered batch for the current step using provided functions.
 
 {last_evaluation}
 CURRENT WORKING DIRECTORY:
@@ -1234,8 +1323,14 @@ arithmetic or comparisons, use an available execution function instead of return
 Prefer one bounded bulk work call for several related noninteractive operations. Before finish_step, use a work
 function to print the final observable result when prior successful actions had empty output."""
         print(prompt)
-        result = normalize_native_action(
-            call_gemini_function(prompt, system, native_action_declarations())
+        result = schedule_native_action_batch(
+            call_gemini_function(
+                prompt,
+                system,
+                native_action_declarations(),
+                allow_multiple=True,
+            ),
+            program_state,
         )
     else:
         system = build_action_system_prompt(goal, current_step, action_history)
@@ -1310,6 +1405,9 @@ CURRENT STEP:
 LAST ACTION:
 {action}
 
+RECENT ACTION EVIDENCE (UNTRUSTED DATA):
+{safe_json(trim_history(action_history))}
+
 BEGIN UNTRUSTED TOOL OUTPUT:
 {tool_output}
 END UNTRUSTED TOOL OUTPUT
@@ -1342,7 +1440,69 @@ RULES:
             "The action completed successfully but produced no output. Verify the requested artifact or state "
             "with another action before marking the step done."
         )
+    elif str(result.get("status", "")).strip().lower() == "done" and evaluator_reason_requires_more_work(
+        str(result.get("reason", ""))
+    ):
+        result["status"] = "ongoing"
+    if str(result.get("status", "")).strip().lower() == "done" and freshness_evidence_missing(
+        current_step, action_history
+    ):
+        result["status"] = "ongoing"
+        result["reason"] = (
+            "Freshness is not yet evidenced. Obtain both the file modification time and the current time, then "
+            "compare or report their difference before completing the step."
+        )
     return result
+
+
+def evaluator_reason_requires_more_work(reason: str) -> bool:
+    normalized = " ".join(reason.lower().split())
+    patterns = (
+        r"\bnext (?:step|action|check)\b",
+        r"\b(?:further|additional|remaining) (?:work|actions?|checks?|evidence|information)\b",
+        r"\b(?:still|also) (?:needs?|requires?)\b",
+        r"\bnot yet\b",
+        r"\bhowever\b.*\b(?:needs?|requires?|missing)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+def freshness_evidence_missing(current_step: str, action_history: List[Dict[str, Any]]) -> bool:
+    normalized_step = " ".join(current_step.lower().split())
+    if not re.search(r"\b(?:up[- ]to[- ]date|fresh(?:ness)?)\b", normalized_step):
+        return False
+    evidence = safe_json(trim_history(action_history)).lower()
+    has_file_time = bool(re.search(r"\bstat\b|mtime|modification time|modified", evidence))
+    has_current_time = bool(re.search(r"\bdate\b|current[_ ]time|current[_ ]epoch|age_seconds", evidence))
+    has_comparison = "age_seconds" in evidence
+    return not (has_file_time and has_current_time and has_comparison)
+
+
+def freshness_comparison_action(
+    current_step: str,
+    action_history: List[Dict[str, Any]],
+) -> Optional[str]:
+    if not freshness_evidence_missing(current_step, action_history):
+        return None
+    evidence = safe_json(trim_history(action_history)).lower()
+    if not re.search(r"\bstat\b|mtime|modification time|modified", evidence):
+        return None
+    if not re.search(r"\bdate\b|current[_ ]time|current[_ ]epoch", evidence):
+        return None
+    for entry in reversed(action_history):
+        action = str(entry.get("action", ""))
+        match = re.search(r"(?:\$HOME|~)/[A-Za-z0-9._/-]+", action)
+        if not match:
+            continue
+        target = match.group(0)
+        if target.startswith("~/"):
+            target = "$HOME/" + target[2:]
+        return (
+            f'shell:modified=$(stat -c %Y "{target}"); now=$(date +%s); '
+            'printf "modified_epoch=%s\\ncurrent_epoch=%s\\nage_seconds=%s\\n" '
+            '"$modified" "$now" "$((now-modified))"'
+        )
+    return None
 
 
 def evaluate_completion_claim(
@@ -1378,6 +1538,12 @@ RULES:
     status = str(result.get("status", "ongoing")).strip().lower()
     if status != "done":
         status = "ongoing"
+    if status == "done" and freshness_evidence_missing(current_step, action_history):
+        status = "ongoing"
+        result["reason"] = (
+            "Freshness is not yet evidenced. Obtain both the file modification time and the current time, then "
+            "compare or report their difference before completing the step."
+        )
     return {
         "status": status,
         "reason": str(result.get("reason") or "Completion needs concrete verification."),
@@ -2295,6 +2461,8 @@ def run_agent(goal: str) -> None:
     program_state: Dict[str, Any] = {
         "exp_cache_loaded": len(exp_store.entries),
         "force_next_action": None,
+        "native_action_queue": [],
+        "native_pending_control": None,
     }
 
     # Preserve original goal and optionally run the goal formalizer
@@ -2376,6 +2544,7 @@ def run_agent(goal: str) -> None:
                     last_eval = completion
                     print(f"➡️ FINISH REJECTED: {completion['reason']}")
                     continue
+                clear_native_action_batch(program_state, "step completed")
                 print(f"✅ STEP DONE: {current_step}")
                 if next_action.startswith("return:"):
                     tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
@@ -2398,6 +2567,7 @@ def run_agent(goal: str) -> None:
                 break
 
             if status == "fail":
+                clear_native_action_batch(program_state, "decision failed")
                 print(f"❌ DECISION FAIL: {reason}")
                 recovery = recover_from_failure(
                     goal=formalized_goal,
@@ -2441,6 +2611,7 @@ def run_agent(goal: str) -> None:
 
             tool_result = run_tool(next_action, memory, agent_state, program_state=program_state)
             if "interactive_mode" in tool_result and tool_result["interactive_mode"]:
+                clear_native_action_batch(program_state, "tool entered persistent mode")
                 program_state = tool_result.get("program_state", program_state)
                 memory = tool_result["memory"]
                 agent_state = tool_result["state"]
@@ -2559,13 +2730,28 @@ def run_agent(goal: str) -> None:
             eval_status = str(evaluation.get("status", "")).strip().lower()
             eval_reason = str(evaluation.get("reason", "No reason provided"))
 
+            if (
+                agent_state.get("pending_failure")
+                and tool_result.get("ok") is True
+                and eval_status in {"ongoing", "done"}
+            ):
+                finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
+                program_state["exp_cache_loaded"] = len(exp_store.entries)
+
             if eval_status == "ongoing" and tool_result.get("ok") is True and not tool_output.strip():
                 verification_action = verification_action_for_silent_success(next_action)
                 if verification_action:
                     program_state["force_next_action"] = verification_action
                     print(f"🔎 FORCING SILENT-SUCCESS VERIFICATION: {verification_action}")
 
+            if eval_status == "ongoing" and program_state.get("force_next_action") is None:
+                comparison_action = freshness_comparison_action(current_step, action_history)
+                if comparison_action:
+                    program_state["force_next_action"] = comparison_action
+                    print(f"🕒 FORCING DETERMINISTIC FRESHNESS COMPARISON: {comparison_action}")
+
             if eval_status == "done":
+                clear_native_action_batch(program_state, "step completed after action")
                 print(f"✅ STEP COMPLETE AFTER ACTION: {next_action}")
                 finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
                 program_state["exp_cache_loaded"] = len(exp_store.entries)
@@ -2575,6 +2761,7 @@ def run_agent(goal: str) -> None:
                 break
 
             if eval_status == "fail":
+                clear_native_action_batch(program_state, "action evaluation failed")
                 print(f"❌ ACTION EVALUATION FAIL: {eval_reason}")
                 recovery = recover_from_failure(
                     goal=formalized_goal,
