@@ -2,7 +2,20 @@
 
 Pigion is a daily-use learning platform for autonomous watchdogs across cheap household and lab devices. This roadmap has no dates and makes no polished-product commitments. Each phase separates current capability, the next concrete milestone, and longer-term experimentation.
 
-## 1. Pigion Todo and Phone Shortcut Protocol
+## 1. `askuser` Bus and Escalation
+
+**Current:** `askuser` is handled as a local blocking input operation rather than a reliable request/response bus between watchdogs, the orchestrator, and the user.
+
+**Next milestone:** Repair `askuser` as an asynchronous Pigion communication bus with both orchestrator-first escalation and an explicit direct-to-user path.
+
+- Define an `askuser` request with a stable request ID, originating watchdog/job, question, relevant bounded context, requested route, status, timeout, and answer provenance.
+- Make orchestrator-first the normal escalation path: a watchdog asks the orchestrator, the orchestrator answers when it has sufficient context, and otherwise escalates the unresolved question to the user.
+- Route the user's answer back through the orchestrator to the waiting watchdog and resume the original job without losing its request association.
+- Allow a watchdog to deliberately address the user directly when orchestrator mediation is unwanted, without first escalating through the orchestrator.
+- Represent pending, answered, timed-out, cancelled, and failed questions explicitly; make retries and reconnects idempotent instead of issuing duplicate prompts.
+- Expose both routes through the dashboard and future phone communication protocol while retaining the origin and full escalation chain.
+
+## 2. Pigion Todo and Phone Shortcut Protocol
 
 **Current:** `pigion-todo` and its iPhone Shortcut interface exist outside Pigion's framework and device communication model.
 
@@ -13,7 +26,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Define the iPhone Shortcut request, authentication, device identity, job submission, status, and result shapes as a reusable phone communication protocol.
 - Prove the protocol through the todo framework before generalizing it to other phone-triggered watchdogs.
 
-## 2. Deployment Updates Through `auto-update-changer`
+## 3. Deployment Updates Through `auto-update-changer`
 
 **Current:** Pigion records framework revisions when generating deployments, but updating deployed watchdog code is not a primary, uniform lifecycle.
 
@@ -24,7 +37,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Define rollback and failed-update reporting before treating an update as complete.
 - Keep fresh installation and removal separate from routine deployed-code updates.
 
-## 3. Drag-and-Drop Deployment Changes
+## 4. Drag-and-Drop Deployment Changes
 
 **Current:** Files added to a controller-side spawned watchdog machine/package are not automatically reflected on the corresponding installed deployment.
 
@@ -35,7 +48,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Transfer changes through the normal update path, apply them on the deployment, and report verification or conflict failures.
 - Coalesce bursts of file changes so drag-and-drop updates do not produce an update job per filesystem event.
 
-## 4. Direct/Relay-Aware Package Transfer
+## 5. Direct/Relay-Aware Package Transfer
 
 **Current:** Pigion does not select a large-package transport based on whether Tailscale has a direct peer-to-peer UDP path or is using a relay.
 
@@ -47,7 +60,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Install and verify `fiotransfer` automatically on every supported deployment through framework/deployment lifecycle hooks.
 - Verify checksums and package identity after either transfer path before applying an update.
 
-## 5. Cron Jobs and Pigion Hooks
+## 6. Cron Jobs and Pigion Hooks
 
 **Current:** Frameworks can ship lifecycle scripts and watchdogs can create helper scripts, but cron jobs and hooks do not yet have a common Pigion contract.
 
@@ -58,7 +71,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Route hook invocations through normal watchdog jobs instead of creating a second agent-control path.
 - Prove hook cleanup and idempotent reinstall behavior across supported operating systems.
 
-## 6. Ambient Transcribing System Hook
+## 7. Ambient Transcribing System Hook
 
 **Current:** `pigion-ATS` does not clearly communicate its actual purpose and is not integrated through a standard Pigion hook.
 
@@ -69,7 +82,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Send bounded transcript context and provenance through the hook without treating the orchestrator as the transcription engine.
 - Let a receiving watchdog decide what action, storage, or escalation the transcription event requires.
 
-## 7. Orchestrator Attention and Context
+## 8. Orchestrator Attention and Context
 
 **Current:** The orchestrator can route queued goals to named watchdogs and receive their results. It does not collect unsolicited observations or redistribute context.
 
@@ -80,7 +93,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Add orchestrator-side filtering, relevance decisions, targeted context injection, provenance, and loop prevention.
 - Preserve watchdog independence; do not share complete internal state or turn the orchestrator into the reasoning brain.
 
-## 8. Architecture and Limitation Awareness
+## 9. Architecture and Limitation Awareness
 
 **Current:** Framework and device profiles declare capabilities, unavailable actions, observable state, dependencies, privilege boundaries, physical constraints, known failure modes, and uncertainty. Watchdog prompts receive concise role-specific capability or dependency context rather than the full profile; heartbeat updates give the orchestrator a routing view. Facts retain `declared`, `observed`, or `inferred` provenance, and runtime recovery records observed failure modes.
 
@@ -92,7 +105,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Let watchdogs and the orchestrator report when a request exceeds known limits instead of silently inventing a capability; this is architectural self-knowledge, not a safety or approval layer.
 - Update profiles from real failures and changed device state while retaining provenance for whether a limit was declared, observed, or inferred.
 
-## 9. Mixed Physical and Digital Integrations
+## 10. Mixed Physical and Digital Integrations
 
 **Current:** Pigion has generalized computer watchdogs and a GPT Researcher wrapper, but not the representative physical-device set.
 
@@ -102,7 +115,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Define each integration through its own framework manifest, tools, lifecycle, observations, and operating assumptions.
 - Use these real integrations to discover coordination and helper-trigger patterns rather than designing them entirely in advance.
 
-## 10. Framework-Owned Trigger Helpers
+## 11. Framework-Owned Trigger Helpers
 
 **Current:** The communication client polls for externally queued goals. A framework or watchdog can create its own scripts, but Pigion has no documented convention for small helpers that wake or call an agent.
 
@@ -112,7 +125,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Keep helpers small and deterministic; they detect and notify, while the watchdog performs the autonomous reasoning and response.
 - Extract a common helper invocation and management convention only after multiple framework implementations demonstrate reusable behavior.
 
-## 11. ShadowFS
+## 12. ShadowFS
 
 **Current:** Model-selected file changes normally touch the host filesystem directly.
 
@@ -122,7 +135,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Let watchdogs mutate a shadow workspace, inspect consequences, and commit or discard changes.
 - Present ShadowFS as a feedback and experimentation mechanism, not a promise that Pigion becomes safe.
 
-## 12. Maintenance and Developer Experience
+## 13. Maintenance and Developer Experience
 
 **Current:** The platform works around several known parser, entrypoint, tool-contract, and runtime-state inconsistencies.
 
@@ -132,7 +145,7 @@ Pigion is a daily-use learning platform for autonomous watchdogs across cheap ho
 - Keep the orchestrator and framework runtimes independent rather than prioritizing a single universal agent core.
 - Improve diagnostics and extension documentation only where they unblock coordination, integrations, or trigger helpers.
 
-## 13. Longer-Term Experiments
+## 14. Longer-Term Experiments
 
 **Current:** The complete controller already runs on Raspberry Pi Zero 2 W-class hardware and can use local or low-cost model providers.
 
