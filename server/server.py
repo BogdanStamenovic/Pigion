@@ -1509,7 +1509,7 @@ def register_page(request: Request) -> str:
   </section>
   <label>Sudo password</label><input name="sudo_password" type="password" autocomplete="off">
   <label>Routing summary override (optional)</label><textarea name="capability_block" placeholder="Leave blank to derive the orchestrator summary from the architecture profile."></textarea>
-  <label>Device profile additions (optional JSON)</label><textarea name="architecture_profile" placeholder='{"physical_constraints":["Mounted indoors; cannot move."]}'></textarea>
+  <label>Device profile additions (optional JSON)</label><textarea name="architecture_profile" placeholder='{{"physical_constraints":["Mounted indoors; cannot move."]}}'></textarea>
   {f'<details><summary>Invalid framework diagnostics</summary><ul>{diagnostics}</ul></details>' if diagnostics else ''}
   <p><button type="submit">Register Device</button></p>
 </form>
