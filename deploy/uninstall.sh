@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 SERVICES=(
   pigion-orchestrator.service
   pigion-web.service
@@ -22,12 +25,13 @@ if [ "$OS_NAME" = "Darwin" ]; then
     launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
     rm -f "$launch_dir/$label.plist"
   done
+  rm -rf "$PROJECT_ROOT/.pigion-services"
   echo "Uninstalled Pigion webserver/orchestrator launch agents. Repository data was kept."
   exit 0
 fi
 
 if [ "$OS_NAME" != "Linux" ]; then
-  echo "Unsupported OS for uninstall.sh: $OS_NAME. On Windows run uninstall.ps1." >&2
+  echo "Unsupported OS for deploy/uninstall.sh: $OS_NAME. On Windows run deploy/uninstall.ps1." >&2
   exit 1
 fi
 

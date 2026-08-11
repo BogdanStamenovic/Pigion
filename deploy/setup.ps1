@@ -1,9 +1,10 @@
 # PowerShell setup script: installs requirements and creates a .env with API_KEY and ABS_PATH
-# Usage: .\setup.ps1
+# Usage: .\deploy\setup.ps1
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $ScriptDir
+$ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
+Set-Location $ProjectRoot
 
 # Find Python (the official Windows installer commonly exposes only py.exe).
 $pythonCommand = $null
@@ -104,12 +105,12 @@ if ([string]::IsNullOrWhiteSpace($createVenv) -or $createVenv -match '^[Yy]') {
 }
 
 $pythonExe = if (Test-Path ".venv\Scripts\python.exe") { (Resolve-Path ".venv\Scripts\python.exe").Path } else { (Get-Command $pythonCommand).Source }
-$serviceDir = Join-Path $ScriptDir ".pigion-services"
+$serviceDir = Join-Path $ProjectRoot ".pigion-services"
 New-Item -ItemType Directory -Force -Path $serviceDir | Out-Null
 
 $webScript = @"
 `$ErrorActionPreference = "Continue"
-Set-Location '$($ScriptDir.Replace("'", "''"))'
+Set-Location '$($ProjectRoot.Replace("'", "''"))'
 Get-Content '.env' | ForEach-Object { if (`$_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { [Environment]::SetEnvironmentVariable(`$Matches[1], `$Matches[2].Trim('"'), 'Process') } }
 while (`$true) {
     & '$($pythonExe.Replace("'", "''"))' -m uvicorn server.server:app --host 0.0.0.0 --port 8000
@@ -118,10 +119,10 @@ while (`$true) {
 "@
 $orchestratorScript = @"
 `$ErrorActionPreference = "Continue"
-Set-Location '$($ScriptDir.Replace("'", "''"))'
+Set-Location '$($ProjectRoot.Replace("'", "''"))'
 Get-Content '.env' | ForEach-Object { if (`$_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { [Environment]::SetEnvironmentVariable(`$Matches[1], `$Matches[2].Trim('"'), 'Process') } }
 while (`$true) {
-    & '$($pythonExe.Replace("'", "''"))' -m server.orchestrator_client --server 'http://127.0.0.1:8000' --python '$($pythonExe.Replace("'", "''"))' --project-root '$($ScriptDir.Replace("'", "''"))'
+    & '$($pythonExe.Replace("'", "''"))' -m server.orchestrator_client --server 'http://127.0.0.1:8000' --python '$($pythonExe.Replace("'", "''"))' --project-root '$($ProjectRoot.Replace("'", "''"))'
     Start-Sleep -Seconds 5
 }
 "@

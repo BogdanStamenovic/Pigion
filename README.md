@@ -96,11 +96,14 @@ Pigion/
   TOOLDOCS.md
   FRAMEDOCS.md
   maker.py
-  install.sh
-  setup.sh
-  setup.ps1
-  uninstall.sh
   requirements.txt
+  deploy/
+    install.sh
+    install.ps1
+    setup.sh
+    setup.ps1
+    uninstall.sh
+    uninstall.ps1
   server/
     server.py
     device_client.py
@@ -143,10 +146,10 @@ Python 3 is required. The installer can provision it through Homebrew on macOS o
 ```bash
 git clone <your-pigion-repository-url>
 cd Pigion
-./install.sh
+./deploy/install.sh
 ```
 
-`install.sh` delegates to `setup.sh`. The setup creates `.venv`, installs `requirements.txt`, prepares configuration/state, and installs the web and orchestrator as systemd services on Linux or user LaunchAgents on macOS. On Windows, run `setup.ps1` to install user Scheduled Tasks.
+`deploy/install.sh` delegates to `deploy/setup.sh`. The setup operates on the repository root, creates `.venv`, installs `requirements.txt`, prepares configuration/state, and installs the web and orchestrator as systemd services on Linux or user LaunchAgents on macOS. On Windows, run `deploy/setup.ps1` to install user Scheduled Tasks.
 
 The important controller settings are:
 
@@ -165,7 +168,7 @@ The built-in Pigion runtime supports `gemini`, `openai`, and `ollama`. Provider-
 The installer normally binds the webserver to `0.0.0.0`. When Tailscale is available, setup prefers its IPv4 address for generated device installers. Override the advertised address with:
 
 ```bash
-PIGION_PUBLIC_HOST=100.x.y.z ./install.sh
+PIGION_PUBLIC_HOST=100.x.y.z ./deploy/install.sh
 ```
 
 Open:
@@ -179,10 +182,10 @@ The repository defaults are `admin` / `pigion`; change them before treating the 
 To remove the repo-local web and orchestrator services without deleting repository data:
 
 ```bash
-./uninstall.sh
+./deploy/uninstall.sh
 ```
 
-Windows `setup.ps1` prepares the local Python environment and registers the controller processes as Scheduled Tasks. Use `uninstall.ps1` to remove those tasks. The uninstall scripts keep repository data and the virtual environment.
+Windows `deploy/setup.ps1` prepares the local Python environment and registers the controller processes as Scheduled Tasks. Use `deploy/uninstall.ps1` to remove those tasks. The uninstall scripts keep repository data and the virtual environment.
 
 ## Registering a Watchdog
 

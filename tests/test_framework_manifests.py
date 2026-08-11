@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -194,6 +195,47 @@ class RepositoryManifestTests(unittest.TestCase):
                 self.assertTrue((generated / "tools" / "return_value.py").is_file())
                 manifest = json.loads((generated / "exp" / "framework_manifest.json").read_text())
                 self.assertEqual(manifest["source_runtime"], "linux")
+
+
+class ControllerDeployLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.deploy = cls.root / "deploy"
+
+    def test_controller_scripts_live_only_in_deploy(self):
+        names = (
+            "install.sh",
+            "install.ps1",
+            "setup.sh",
+            "setup.ps1",
+            "uninstall.sh",
+            "uninstall.ps1",
+        )
+        for name in names:
+            self.assertTrue((self.deploy / name).is_file(), name)
+            self.assertFalse((self.root / name).exists(), name)
+        for name in ("install.sh", "setup.sh", "uninstall.sh"):
+            self.assertTrue(os.access(self.deploy / name, os.X_OK), name)
+
+    def test_setup_and_uninstall_resolve_repository_root(self):
+        setup_sh = (self.deploy / "setup.sh").read_text(encoding="utf-8")
+        setup_ps1 = (self.deploy / "setup.ps1").read_text(encoding="utf-8")
+        uninstall_ps1 = (self.deploy / "uninstall.ps1").read_text(encoding="utf-8")
+        self.assertIn('PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"', setup_sh)
+        self.assertIn('cd "$PROJECT_ROOT"', setup_sh)
+        self.assertIn('$ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path', setup_ps1)
+        self.assertIn("Set-Location $ProjectRoot", setup_ps1)
+        self.assertIn('Join-Path $ProjectRoot ".pigion-services"', uninstall_ps1)
+
+    def test_deploy_is_explicitly_tracked_and_documented(self):
+        ignore = (self.root / ".gitignore").read_text(encoding="utf-8")
+        readme = (self.root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("!/deploy/", ignore)
+        self.assertIn("!/deploy/*.sh", ignore)
+        self.assertIn("!/deploy/*.ps1", ignore)
+        self.assertIn("./deploy/install.sh", readme)
+        self.assertIn("./deploy/uninstall.sh", readme)
 
 
 if __name__ == "__main__":

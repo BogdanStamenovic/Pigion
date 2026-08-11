@@ -2,12 +2,13 @@
 # orchestrator, or platforms trees; maker.py is the repository helper/generator.
 /*
 !/tests/*
-!*.sh
 !*.md
-!*.ps1
 !*.txt
 !/.gitignore
 !/maker.py
+!/deploy/
+!/deploy/*.sh
+!/deploy/*.ps1
 !/server/
 !/orchestrator/
 !/platforms/

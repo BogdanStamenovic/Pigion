@@ -2,10 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # Setup script: installs requirements and creates a .env with API_KEY
-# Usage: ./setup.sh
+# Usage: ./deploy/setup.sh
 
 OS_NAME="$(uname -s)"
 
@@ -321,7 +322,7 @@ install_services() {
   elif [ "$OS_NAME" = "Linux" ]; then
     install_systemd_services
   else
-    echo "Unsupported OS for setup.sh: $OS_NAME. On Windows run setup.ps1." >&2
+    echo "Unsupported OS for deploy/setup.sh: $OS_NAME. On Windows run deploy/setup.ps1." >&2
     exit 1
   fi
 }
