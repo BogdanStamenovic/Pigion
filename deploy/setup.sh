@@ -156,7 +156,7 @@ allow_tailscale_firewall() {
   fi
 }
 
-install_systemd_services() {
+install_systemd_services() (
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found; skipping service installation."
     return
@@ -181,7 +181,7 @@ install_systemd_services() {
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' RETURN
+  trap 'rm -rf -- "$tmp_dir"' EXIT
 
   cat > "$tmp_dir/pigion-web.service" <<EOF
 [Unit]
@@ -234,7 +234,7 @@ EOF
   run_sudo systemctl enable --now pigion-web.service pigion-orchestrator.service
   echo "Installed services: pigion-web.service, pigion-orchestrator.service"
   echo "Webserver should be reachable at: $server_url/login"
-}
+)
 
 xml_escape() {
   "$PY" -c 'import html, sys; print(html.escape(sys.argv[1], quote=True))' "$1"
