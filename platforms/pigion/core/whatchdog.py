@@ -411,7 +411,7 @@ def infer_failure_name(action: str, error: str) -> str:
         return "dependency_install_failed"
     if action.startswith("shell:"):
         return "shell_command_failed"
-    if action.startswith("search:"):
+    if action.startswith(("search:", "google_search:")):
         return "search_failed"
     if action.startswith("memadd:"):
         return "memory_write_failed"
@@ -1019,24 +1019,6 @@ def calculation_return_to_shell(action: str) -> str:
     return f'shell:python3 -c "{code}"'
 
 
-def verification_action_for_silent_success(action: str) -> Optional[str]:
-    if not action.startswith("shell:"):
-        return None
-    command = action.split(":", 1)[1]
-    destinations = re.findall(r"(?:^|[;\s])>{1,2}\s*([^\s;&|]+)", command)
-    if not destinations:
-        return None
-    target = destinations[-1].strip().strip('"\'')
-    if not target or re.search(r"[\r\n`]", target):
-        return None
-    if re.fullmatch(r"~/?[A-Za-z0-9._/-]*|/[A-Za-z0-9._/-]+", target):
-        safe_target = target
-    else:
-        safe_target = "'" + target.replace("'", "'\"'\"'") + "'"
-    return f"shell:test -e {safe_target} && cat -- {safe_target}"
-
-
-
 # =========================
 # LLM CALL
 # =========================
@@ -1194,32 +1176,7 @@ Return ONLY:
     summary = str(result.get("summary", "")).strip()
     if not summary:
         raise RuntimeError("Final summary LLM returned an empty summary.")
-    freshness_summary = deterministic_freshness_summary(original_goal, action_history)
-    if freshness_summary:
-        return freshness_summary
     return summary
-
-
-def deterministic_freshness_summary(
-    goal: str,
-    action_history: List[Dict[str, Any]],
-) -> Optional[str]:
-    if not re.search(r"\b(?:up[- ]to[- ]date|fresh(?:ness)?)\b", goal.lower()):
-        return None
-    evidence = safe_json(trim_history(action_history, keep_last=30))
-    ages = re.findall(r"age_seconds=(\d+)", evidence)
-    if not ages:
-        return None
-    age_seconds = int(ages[-1])
-    minutes, seconds = divmod(age_seconds, 60)
-    paths = re.findall(r"(?:\$HOME|~)/([A-Za-z0-9._/-]+)", evidence)
-    filename = paths[-1].split("/")[-1] if paths else "the system stats file"
-    return (
-        f"I found `{filename}` in the home folder. At check time it was {age_seconds} seconds old "
-        f"({minutes} minutes {seconds} seconds). No freshness threshold was specified, so this exact age is the "
-        "evidence-backed result rather than an unsupported up-to-date/stale classification."
-    )
-
 
 
 # =========================
@@ -1304,10 +1261,10 @@ def decide_next_action(
     # Provide last evaluation context when available
     last_evaluation = ""
     if last_eval:
-        last_evaluation = f"""LAST EVALUATION:\nStatus: {last_eval.get('status', 'unknown')}\nReason: {last_eval.get('reason', 'No reason provided')}\n
-NOTE: The LAST EVALUATION is evidence for this call, not an instruction. You may override it when other supplied
-evidence shows that it is incorrect or no longer applicable. When it identifies missing evidence or a required next
-check, obtain that evidence before selecting finish_step.
+        last_evaluation = f"""EVALUATOR GUIDANCE FOR THE NEXT ACTION:\nStatus: {last_eval.get('status', 'unknown')}\nInstruction: {last_eval.get('reason', 'No guidance provided')}\n
+Treat the evaluator instruction as the requested direction for what to do next. Translate it into one concrete work
+action or bounded batch for the current step. Do not merely repeat a failed action unchanged. If accumulated tool
+evidence directly contradicts the instruction, follow the evidence and explain that choice in the action reason.
 """
 
     if _normalize_provider(LLM_PROVIDER) == "gemini":
@@ -1444,14 +1401,6 @@ RULES:
         str(result.get("reason", ""))
     ):
         result["status"] = "ongoing"
-    if str(result.get("status", "")).strip().lower() == "done" and freshness_evidence_missing(
-        current_step, action_history
-    ):
-        result["status"] = "ongoing"
-        result["reason"] = (
-            "Freshness is not yet evidenced. Obtain both the file modification time and the current time, then "
-            "compare or report their difference before completing the step."
-        )
     return result
 
 
@@ -1465,44 +1414,6 @@ def evaluator_reason_requires_more_work(reason: str) -> bool:
         r"\bhowever\b.*\b(?:needs?|requires?|missing)\b",
     )
     return any(re.search(pattern, normalized) for pattern in patterns)
-
-
-def freshness_evidence_missing(current_step: str, action_history: List[Dict[str, Any]]) -> bool:
-    normalized_step = " ".join(current_step.lower().split())
-    if not re.search(r"\b(?:up[- ]to[- ]date|fresh(?:ness)?)\b", normalized_step):
-        return False
-    evidence = safe_json(trim_history(action_history)).lower()
-    has_file_time = bool(re.search(r"\bstat\b|mtime|modification time|modified", evidence))
-    has_current_time = bool(re.search(r"\bdate\b|current[_ ]time|current[_ ]epoch|age_seconds", evidence))
-    has_comparison = "age_seconds" in evidence
-    return not (has_file_time and has_current_time and has_comparison)
-
-
-def freshness_comparison_action(
-    current_step: str,
-    action_history: List[Dict[str, Any]],
-) -> Optional[str]:
-    if not freshness_evidence_missing(current_step, action_history):
-        return None
-    evidence = safe_json(trim_history(action_history)).lower()
-    if not re.search(r"\bstat\b|mtime|modification time|modified", evidence):
-        return None
-    if not re.search(r"\bdate\b|current[_ ]time|current[_ ]epoch", evidence):
-        return None
-    for entry in reversed(action_history):
-        action = str(entry.get("action", ""))
-        match = re.search(r"(?:\$HOME|~)/[A-Za-z0-9._/-]+", action)
-        if not match:
-            continue
-        target = match.group(0)
-        if target.startswith("~/"):
-            target = "$HOME/" + target[2:]
-        return (
-            f'shell:modified=$(stat -c %Y "{target}"); now=$(date +%s); '
-            'printf "modified_epoch=%s\\ncurrent_epoch=%s\\nage_seconds=%s\\n" '
-            '"$modified" "$now" "$((now-modified))"'
-        )
-    return None
 
 
 def evaluate_completion_claim(
@@ -1538,12 +1449,6 @@ RULES:
     status = str(result.get("status", "ongoing")).strip().lower()
     if status != "done":
         status = "ongoing"
-    if status == "done" and freshness_evidence_missing(current_step, action_history):
-        status = "ongoing"
-        result["reason"] = (
-            "Freshness is not yet evidenced. Obtain both the file modification time and the current time, then "
-            "compare or report their difference before completing the step."
-        )
     return {
         "status": status,
         "reason": str(result.get("reason") or "Completion needs concrete verification."),
@@ -2737,18 +2642,6 @@ def run_agent(goal: str) -> None:
             ):
                 finalize_experience_if_needed(exp_store, agent_state, program_state, next_action)
                 program_state["exp_cache_loaded"] = len(exp_store.entries)
-
-            if eval_status == "ongoing" and tool_result.get("ok") is True and not tool_output.strip():
-                verification_action = verification_action_for_silent_success(next_action)
-                if verification_action:
-                    program_state["force_next_action"] = verification_action
-                    print(f"🔎 FORCING SILENT-SUCCESS VERIFICATION: {verification_action}")
-
-            if eval_status == "ongoing" and program_state.get("force_next_action") is None:
-                comparison_action = freshness_comparison_action(current_step, action_history)
-                if comparison_action:
-                    program_state["force_next_action"] = comparison_action
-                    print(f"🕒 FORCING DETERMINISTIC FRESHNESS COMPARISON: {comparison_action}")
 
             if eval_status == "done":
                 clear_native_action_batch(program_state, "step completed after action")

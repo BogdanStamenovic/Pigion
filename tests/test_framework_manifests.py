@@ -154,8 +154,24 @@ class RepositoryManifestTests(unittest.TestCase):
             manifest = maker.validated_framework_manifest(runtime, "pigion")
             self.assertEqual(
                 maker.default_tools_for_platform(runtime, "pigion"),
-                [tool["name"] for tool in manifest["tools"]],
+                [tool["name"] for tool in manifest["tools"] if tool["policy"] in {"required", "default"}],
             )
+
+    def test_pigion_search_providers_are_exclusive_and_google_is_default(self):
+        for runtime in ("linux", "macos", "windows"):
+            manifest = maker.validated_framework_manifest(runtime, "pigion")
+            specs = {tool["name"]: tool for tool in manifest["tools"]}
+            self.assertEqual(specs["google_search"]["exclusive_group"], "web_search")
+            self.assertEqual(specs["google_search"]["requires_provider"], "gemini")
+            self.assertEqual(specs["search"]["exclusive_group"], "web_search")
+            self.assertIn("google_search", maker.default_tools_for_platform(runtime, "pigion"))
+            self.assertNotIn("search", maker.default_tools_for_platform(runtime, "pigion"))
+            with self.assertRaisesRegex(ValueError, "exclusive group 'web_search'"):
+                maker.validate_tool_selection(["search", "google_search"], runtime, "pigion")
+
+    def test_custom_search_can_replace_google_search(self):
+        selected = maker.validate_tool_selection(["shell", "search", "return"], "linux", "pigion")
+        self.assertEqual(selected, ["shell", "search", "return"])
 
     def test_gpt_researcher_requires_research(self):
         for runtime in ("linux", "macos", "windows"):
@@ -182,6 +198,21 @@ class RepositoryManifestTests(unittest.TestCase):
                 profile = json.loads((generated / "exp" / "architecture_profile.json").read_text())
                 self.assertEqual(profile["device"]["selected_tools"], ["shell", "return"])
                 self.assertTrue(profile["known_failure_modes"])
+
+    def test_pigion_google_search_selection_copies_only_grounded_search(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(maker, "PROJECT_ROOT", Path(temporary)):
+                maker.create_instance(
+                    "grounded", "linux", ["google_search", "return"], framework="pigion",
+                    environment_text="OS: Linux\nTERMINAL: bash\n",
+                )
+                generated = Path(temporary) / "grounded"
+                self.assertTrue((generated / "tools" / "google_search.py").is_file())
+                self.assertFalse((generated / "tools" / "search.py").exists())
+                self.assertEqual(
+                    (generated / "exp" / "tool_import.txt").read_text(),
+                    "google_search return\n",
+                )
 
     def test_macos_instance_copies_tools_from_source_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -287,7 +287,8 @@ class WatchdogPromptArchitectureTests(unittest.TestCase):
         caller = function_source(self.pigion, "call_gemini_function")
         self.assertIn("AutomaticFunctionCallingConfig(disable=True)", caller)
         self.assertIn("FunctionCallingConfigMode.ANY", caller)
-        self.assertIn("len(calls) != 1", caller)
+        self.assertIn("len(calls) > 1 and not allow_multiple", caller)
+        self.assertIn("selected_calls = calls if allow_multiple else calls[:1]", caller)
 
         selector = function_source(self.pigion, "decide_next_action")
         self.assertIn('if _normalize_provider(LLM_PROVIDER) == "gemini"', selector)

@@ -13,13 +13,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 PLATFORMS_ROOT = PROJECT_ROOT / "platforms"
 DEFAULT_FRAMEWORK = "pigion"
-TOOL_ORDER = ("shell", "memadd", "search", "permamemory", "return", "askuser")
+TOOL_ORDER = ("shell", "memadd", "google_search", "search", "permamemory", "return", "askuser")
 
 TOOL_DOCS = {
     "shell": 'Shell, Description: Executes a shell command and returns stdout/stderr, Command - shell:COMMAND, Example - shell:echo "hi"',
     "memadd": "Memory, Description: Stores temporary context memory for the current session (not persistent), Command - memadd:TEXT_OR_KEY=VALUE, Example - memadd:User prefers Python",
     "permamemory": "PermanentMemory, Description: Stores and retrieves permanent key-value memories across sessions, Command - permamemory:ACTION_OR_KEY=VALUE, Example - permamemory:set user_name=Bogdan or permamemory:get user_name or permamemory:list",
     "search": "Search, Description: Performs web search for queries or extracts text content from a URL, Command - search:QUERY_OR_URL, Example - search:openai api or search:https://example.com",
+    "google_search": "GoogleSearch, Description: Searches the public web with Gemini Google Search grounding and returns grounded text plus sources, Command - google_search:QUERY, Example - google_search:latest Python release",
     "return": "Return, Description: Returns something back to the user at the end of the goal if needed, Command - return:TEXT, Example - return:The task has been completed succesfully",
     "askuser": "AskUser, Description: Asks the user for information and returns the user answer, Command - askuser:TEXT, Example - askuser:Can you provide your location?",
 }
@@ -392,7 +393,21 @@ def validated_framework_manifest(platform: str, framework: str | None = None) ->
         documentation = str(item.get("documentation") or "").strip()
         if not documentation or extract_tool_name_from_doc(documentation) != name:
             raise FrameworkManifestError(f"Tool {name!r} needs documentation with Command - {name}:...")
-        normalized_tools.append({**item, "name": name, "policy": policy, "module": module, "documentation": documentation})
+        exclusive_group = str(item.get("exclusive_group") or "").strip().lower()
+        if exclusive_group and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", exclusive_group):
+            raise FrameworkManifestError(f"Tool {name!r} has invalid exclusive_group {exclusive_group!r}.")
+        requires_provider = str(item.get("requires_provider") or "").strip().lower()
+        if requires_provider and requires_provider not in {"gemini", "openai", "ollama"}:
+            raise FrameworkManifestError(f"Tool {name!r} has invalid requires_provider {requires_provider!r}.")
+        normalized_tools.append({
+            **item,
+            "name": name,
+            "policy": policy,
+            "module": module,
+            "documentation": documentation,
+            "exclusive_group": exclusive_group or None,
+            "requires_provider": requires_provider or None,
+        })
         seen.add(name)
     if not manifest.get("allow_zero_tools", False) and not tools:
         raise FrameworkManifestError("At least one tool is required when allow_zero_tools is false.")
@@ -494,6 +509,17 @@ def validate_tool_selection(selected: list[str], platform: str, framework: str |
     required = [tool["name"] for tool in manifest["tools"] if tool["policy"] == "required"]
     selected_set = set(requested) | set(required)
     ordered = [tool["name"] for tool in manifest["tools"] if tool["name"] in selected_set]
+    selected_groups: dict[str, list[str]] = {}
+    for name in ordered:
+        group = specs[name].get("exclusive_group")
+        if group:
+            selected_groups.setdefault(str(group), []).append(name)
+    conflicts = {group: names for group, names in selected_groups.items() if len(names) > 1}
+    if conflicts:
+        group, names = next(iter(conflicts.items()))
+        raise ValueError(
+            f"Tools in exclusive group {group!r} cannot be combined; choose one of: {', '.join(names)}."
+        )
     if not ordered and not manifest.get("allow_zero_tools", False):
         raise ValueError(f"At least one tool must be selected for {manifest['framework']}/{platform}.")
     return ordered

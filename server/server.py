@@ -1545,10 +1545,20 @@ async function loadFrameworkSpec() {
   }
   let output = '<h2>' + esc(spec.display_name) + ' / ' + esc(spec.runtime) + '</h2><p>' + esc(spec.description) + '</p>';
   output += '<p class="muted">Supported OS: ' + spec.supported_os.map(esc).join(', ') + '. Install lifecycle: ' + (spec.lifecycle.map(esc).join(', ') || 'shared Pigion installer only') + '</p><h3>Tools</h3>';
+  const renderedExclusiveGroups = new Set();
   for (const tool of spec.tools) {
     const checked = tool.policy === 'required' || tool.policy === 'default';
     const locked = tool.policy === 'required';
-    output += '<label><input type="checkbox" name="selected_tools" value="' + esc(tool.name) + '" ' + (checked ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '> ' + esc(tool.name) + ' <small>(' + esc(tool.policy) + ')</small></label>';
+    const inputType = tool.exclusive_group ? 'radio' : 'checkbox';
+    const inputName = tool.exclusive_group ? 'selected_tools__' + tool.exclusive_group : 'selected_tools';
+    output += '<label><input type="' + inputType + '" name="' + esc(inputName) + '" value="' + esc(tool.name) + '" ' + (checked ? 'checked' : '') + ' ' + (locked ? 'disabled' : '') + '> ' + esc(tool.name) + ' <small>(' + esc(tool.policy) + ')</small></label>';
+    if (tool.exclusive_group && !renderedExclusiveGroups.has(tool.exclusive_group)) {
+      const groupDefault = spec.tools.find(function(candidate) {
+        return candidate.exclusive_group === tool.exclusive_group && (candidate.policy === 'required' || candidate.policy === 'default');
+      });
+      output += '<input class="exclusive-tool-selection" type="hidden" name="selected_tools" value="' + esc(groupDefault ? groupDefault.name : '') + '" data-group="' + esc(tool.exclusive_group) + '">';
+      renderedExclusiveGroups.add(tool.exclusive_group);
+    }
     if (locked) output += '<input type="hidden" name="selected_tools" value="' + esc(tool.name) + '">';
     output += '<p class="muted">' + esc(tool.documentation) + '</p>';
   }
@@ -1566,6 +1576,13 @@ async function loadFrameworkSpec() {
     if (question.help) output += '<p class="muted">' + esc(question.help) + '</p>';
   }
   panel.innerHTML = output;
+  panel.querySelectorAll('input[type="radio"][name^="selected_tools__"]').forEach(function(control) {
+    control.addEventListener('change', function() {
+      const group = control.name.substring('selected_tools__'.length);
+      const hidden = panel.querySelector('.exclusive-tool-selection[data-group="' + CSS.escape(group) + '"]');
+      if (hidden) hidden.value = control.value;
+    });
+  });
 }
 if (selector) { selector.addEventListener('change', loadFrameworkSpec); loadFrameworkSpec(); }
 """
@@ -1612,6 +1629,17 @@ async def register(request: Request) -> str:
         selected_tools = validate_tool_selection(values.get("selected_tools", []), platform, framework)
     except (FrameworkManifestError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    selected_specs = {tool["name"]: tool for tool in manifest.get("tools", [])}
+    incompatible_tools = [
+        name for name in selected_tools
+        if selected_specs.get(name, {}).get("requires_provider")
+        and selected_specs[name]["requires_provider"] != llm_provider
+    ]
+    if incompatible_tools:
+        requirements = ", ".join(
+            f"{name} requires {selected_specs[name]['requires_provider']}" for name in incompatible_tools
+        )
+        raise HTTPException(status_code=400, detail=f"Selected tool/provider mismatch: {requirements}.")
     raw_profile_overrides = data.get("architecture_profile", "").strip()
     try:
         profile_overrides = json.loads(raw_profile_overrides) if raw_profile_overrides else None

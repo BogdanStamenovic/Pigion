@@ -10,6 +10,10 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
+# Temporary kill switch. When false, the shell tool never creates or resumes an
+# interactive session. Commands that would require one are rejected instead.
+ALLOW_INTERACTIVE = False
+
 # Main persistent shell
 _SHELL_PID = None
 _SHELL_FD = None
@@ -889,6 +893,58 @@ def _should_use_branch(command_str: str) -> bool:
     return False
 
 
+def _is_bounded_launcher_command(command_str: str) -> bool:
+    """Return true when a launcher-looking command has an explicit finite payload."""
+    peeled = _peel_wrappers(command_str)
+    tokens = peeled["peeled_tokens"]
+    if len(tokens) < 2:
+        return False
+
+    launcher = tokens[0]
+    args = tokens[1:]
+    if launcher in {"python", "python3", "ipython", "pypy"}:
+        if any(flag in args for flag in ("-c", "-m")):
+            return True
+        return any(not arg.startswith("-") and arg != "-" for arg in args)
+    if launcher in {"node", "ruby", "perl", "php", "lua"}:
+        if any(flag in args for flag in ("-e", "--eval", "-p", "--print")):
+            return True
+        return any(not arg.startswith("-") and arg != "-" for arg in args)
+    if launcher in {"bash", "sh", "zsh", "fish", "ksh", "dash"}:
+        if "-c" in args:
+            return not _should_use_branch(command_str)
+        return any(not arg.startswith("-") for arg in args)
+    return False
+
+
+def _rejected_interactive_command(command: Any) -> Dict[str, Any]:
+    command_text = str(command or "").strip()
+    return {
+        "output": (
+            "Command rejected: interactive shell commands are temporarily disabled. "
+            "Use a bounded, non-interactive command with all required arguments instead."
+        ),
+        "exit_code": 2,
+        "interactive_mode": False,
+        "completed": True,
+        "branch_mode": False,
+        "session_label": None,
+        "session_name": None,
+        "cwd_raw": None,
+        "cwd_display": None,
+        "continuing_interactive": False,
+        "rejected_command": command_text,
+    }
+
+
+def _dispose_interactive_sessions() -> None:
+    global _INTERACTIVE_MODE
+    _reset_branch_shell()
+    for session_name in list(_SAVED_BRANCHES):
+        _kill_saved_branch(session_name)
+    _INTERACTIVE_MODE = False
+
+
 def _send_to_fd(fd: Optional[int], text: str) -> None:
     if fd is None:
         raise RuntimeError("Shell is not initialized.")
@@ -947,7 +1003,7 @@ def _read_until_marker_or_idle_fd(
         if not r:
             idle_for = time.monotonic() - last_activity
 
-            if prompt_seen and _shell_alive(pid) and idle_for >= INTERACTIVE_PROMPT_GRACE_SECONDS:
+            if ALLOW_INTERACTIVE and prompt_seen and _shell_alive(pid) and idle_for >= INTERACTIVE_PROMPT_GRACE_SECONDS:
                 raw = "".join(chunks)
                 if marker in raw:
                     raw = raw.split(marker)[0]
@@ -978,7 +1034,7 @@ def _read_until_marker_or_idle_fd(
                 return {
                     "output": _sanitize_output(raw, None, None),
                     "completed": False,
-                    "interactive_mode": True,
+                    "interactive_mode": ALLOW_INTERACTIVE,
                 }
 
             continue
@@ -995,7 +1051,7 @@ def _read_until_marker_or_idle_fd(
         buffer += chunk
         last_activity = time.monotonic()
 
-        if _looks_like_interactive_prompt(buffer):
+        if ALLOW_INTERACTIVE and _looks_like_interactive_prompt(buffer):
             prompt_seen = True
 
         if stream:
@@ -1020,7 +1076,7 @@ def _read_until_marker_or_idle_fd(
             if should_trunc:
                 raw = _apply_truncation(raw, policy, tail_lines, force_tail=truncate)
 
-            if prompt_seen or _looks_like_interactive_prompt(raw):
+            if ALLOW_INTERACTIVE and (prompt_seen or _looks_like_interactive_prompt(raw)):
                 return {
                     "output": _sanitize_output(raw, None, None),
                     "completed": False,
@@ -1049,7 +1105,7 @@ def _read_until_marker_or_idle_fd(
     return {
         "output": _sanitize_output(raw, None, None),
         "completed": False,
-        "interactive_mode": prompt_seen,
+        "interactive_mode": ALLOW_INTERACTIVE and prompt_seen,
     }
 
 
@@ -1067,6 +1123,12 @@ def run_shell(
     global _COUNTER, _INTERACTIVE_MODE, _BRANCH_MARKER, _BRANCH_SESSION_LABEL, _BRANCH_SESSION_NAME, _BRANCH_CWD
 
     with _LOCK:
+        if not ALLOW_INTERACTIVE:
+            _dispose_interactive_sessions()
+            command_text = str(command or "")
+            if _should_use_branch(command_text) and not _is_bounded_launcher_command(command_text):
+                return _rejected_interactive_command(command)
+
         _start_shell()
 
         branch_alive = _shell_alive(_BRANCH_PID)
@@ -1272,7 +1334,7 @@ def run_shell(
                 "continuing_interactive": False,
             }
 
-        use_branch = _should_use_branch(command)
+        use_branch = ALLOW_INTERACTIVE and _should_use_branch(command)
 
         syntax_error = _shell_syntax_error(command)
         if syntax_error:
@@ -1471,7 +1533,7 @@ def shell(command, memory, local_state, program_state):
             program_state.pop("SHELL_PENDING_LAUNCH_COMMAND", None)
             result = run_shell(launch_command, stream=True, truncate=True, cwd=current_cwd)
     else:
-        use_branch = _should_use_branch(command_text)
+        use_branch = ALLOW_INTERACTIVE and _should_use_branch(command_text)
         branch_cwd = _interactive_cwd_identifier(current_cwd or _START_CWD)
         launch_label = _fallback_session_label(command_text) if use_branch else None
         session_name = _branch_session_name(branch_cwd, launch_label) if launch_label else ""
